@@ -23,7 +23,7 @@ func setupMemoryTestDB(t *testing.T) *sql.DB {
 		id TEXT PRIMARY KEY,
 		project_path TEXT NOT NULL,
 		category TEXT NOT NULL DEFAULT 'general',
-		key TEXT NOT NULL,
+		key TEXT NOT NULL COLLATE NOCASE,
 		content TEXT NOT NULL,
 		created_at INTEGER NOT NULL,
 		updated_at INTEGER NOT NULL

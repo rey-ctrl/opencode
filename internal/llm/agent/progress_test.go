@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/opencode-ai/opencode/internal/config"
 	"github.com/opencode-ai/opencode/internal/message"
 	"github.com/opencode-ai/opencode/internal/pubsub"
 	"github.com/stretchr/testify/assert"
@@ -152,3 +153,34 @@ func TestForwardSubagentProgress(t *testing.T) {
 		t.Fatal("timed out waiting for streaming progress event")
 	}
 }
+
+func TestAgentTool_ResolveAgentSpecialists(t *testing.T) {
+	tool := NewAgentToolWithPermissions(nil, nil, nil, nil, nil, nil)
+	at, ok := tool.(*agentTool)
+	require.True(t, ok)
+
+	// Test "reviewer"
+	name, tools := at.resolveAgent("reviewer")
+	assert.Equal(t, config.AgentReviewer, name)
+	assert.NotEmpty(t, tools)
+
+	// Test "tester"
+	name, tools = at.resolveAgent("tester")
+	assert.Equal(t, config.AgentTester, name)
+	assert.NotEmpty(t, tools)
+
+	// Test "debugger"
+	name, tools = at.resolveAgent("debugger")
+	assert.Equal(t, config.AgentDebugger, name)
+	assert.NotEmpty(t, tools)
+
+	// Test default / empty / unknown
+	name, tools = at.resolveAgent("")
+	assert.Equal(t, config.AgentTask, name)
+	assert.NotEmpty(t, tools)
+
+	name, tools = at.resolveAgent("unknown_agent")
+	assert.Equal(t, config.AgentTask, name)
+	assert.NotEmpty(t, tools)
+}
+

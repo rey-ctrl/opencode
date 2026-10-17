@@ -21,7 +21,7 @@ func setupTestDB(t *testing.T) *sql.DB {
 		id TEXT PRIMARY KEY,
 		project_path TEXT NOT NULL,
 		category TEXT NOT NULL DEFAULT 'general',
-		key TEXT NOT NULL,
+		key TEXT NOT NULL COLLATE NOCASE,
 		content TEXT NOT NULL,
 		created_at INTEGER NOT NULL,
 		updated_at INTEGER NOT NULL
@@ -128,6 +128,24 @@ func TestMemoryService_RecallWithFilters(t *testing.T) {
 	}
 	if len(matches) != 1 || matches[0].Key != "windows_path" {
 		t.Errorf("expected 'windows_path' query match, got %+v", matches)
+	}
+
+	// Case-insensitive query and category test
+	ciMatches, err := svc.Recall(ctx, project, "FILEPATH", "GOTCHA")
+	if err != nil {
+		t.Fatalf("case-insensitive recall failed: %v", err)
+	}
+	if len(ciMatches) != 1 || ciMatches[0].Key != "windows_path" {
+		t.Errorf("expected case-insensitive match for 'FILEPATH' in 'GOTCHA', got %+v", ciMatches)
+	}
+
+	// Case-insensitive Get
+	ciGet, err := svc.Get(ctx, project, "WINDOWS_PATH")
+	if err != nil {
+		t.Fatalf("case-insensitive Get failed: %v", err)
+	}
+	if ciGet.Key != "windows_path" {
+		t.Errorf("expected 'windows_path', got %s", ciGet.Key)
 	}
 }
 

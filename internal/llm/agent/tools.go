@@ -55,7 +55,7 @@ func CoderAgentToolsWithBroker(
 		tools.NewWriteTool(lspClients, permissions, history),
 		tools.NewMultiEditTool(lspClients, permissions, history),
 		tools.NewTestRunnerTool(permissions),
-		NewAgentTool(sessions, messages, lspClients, broker),
+		NewAgentToolWithPermissions(sessions, messages, lspClients, broker, permissions, memoryService...),
 	}
 
 	if len(memoryService) > 0 && memoryService[0] != nil {
@@ -168,7 +168,7 @@ func ArchitectAgentToolsWithBroker(
 		tools.NewLsTool(),
 		tools.NewSourcegraphTool(),
 		tools.NewViewTool(lspClients),
-		NewAgentTool(sessions, messages, lspClients, broker),
+		NewAgentToolWithPermissions(sessions, messages, lspClients, broker, nil, memoryService...),
 	}
 	if len(lspClients) > 0 {
 		architectTools = append(architectTools, tools.NewDiagnosticsTool(lspClients))

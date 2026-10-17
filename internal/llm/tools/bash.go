@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/opencode-ai/opencode/internal/config"
 	"github.com/opencode-ai/opencode/internal/llm/tools/shell"
@@ -363,10 +364,19 @@ func truncateOutput(content string) string {
 	keepFromEnd := int(float64(MaxOutputLength) * 0.8)
 	keepFromStart := MaxOutputLength - keepFromEnd
 
-	start := content[:keepFromStart]
-	end := content[len(content)-keepFromEnd:]
+	// Snap to valid UTF-8 rune boundaries so multi-byte characters are never split
+	for keepFromStart > 0 && !utf8.RuneStart(content[keepFromStart]) {
+		keepFromStart--
+	}
+	endStart := len(content) - keepFromEnd
+	for endStart < len(content) && !utf8.RuneStart(content[endStart]) {
+		endStart++
+	}
 
-	droppedLines := countLines(content[keepFromStart : len(content)-keepFromEnd])
+	start := content[:keepFromStart]
+	end := content[endStart:]
+
+	droppedLines := strings.Count(content[keepFromStart:endStart], "\n")
 	return fmt.Sprintf("%s\n\n... [%d lines from middle omitted] ...\n\n%s",
 		start, droppedLines, end)
 }
@@ -375,5 +385,5 @@ func countLines(s string) int {
 	if s == "" {
 		return 0
 	}
-	return len(strings.Split(s, "\n"))
+	return strings.Count(s, "\n") + 1
 }

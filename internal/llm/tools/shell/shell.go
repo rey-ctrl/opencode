@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -20,7 +21,7 @@ import (
 type PersistentShell struct {
 	cmd          *exec.Cmd
 	stdin        io.WriteCloser
-	isAlive      bool
+	isAlive      atomic.Bool
 	cwd          string
 	mu           sync.Mutex
 	commandQueue chan *commandExecution
@@ -64,7 +65,7 @@ func GetShellForSession(sessionID, workingDir string) *PersistentShell {
 
 	globalPool.mu.RLock()
 	s, ok := globalPool.shells[sessionID]
-	if ok && s != nil && s.isAlive {
+	if ok && s != nil && s.isAlive.Load() {
 		globalPool.mu.RUnlock()
 		return s
 	}
@@ -74,7 +75,7 @@ func GetShellForSession(sessionID, workingDir string) *PersistentShell {
 	defer globalPool.mu.Unlock()
 
 	// Double check under write lock
-	if s, ok := globalPool.shells[sessionID]; ok && s != nil && s.isAlive {
+	if s, ok := globalPool.shells[sessionID]; ok && s != nil && s.isAlive.Load() {
 		return s
 	}
 
@@ -188,29 +189,24 @@ func newPersistentShell(cwd string) *PersistentShell {
 	shell := &PersistentShell{
 		cmd:          cmd,
 		stdin:        stdinPipe,
-		isAlive:      true,
 		cwd:          cwd,
 		commandQueue: make(chan *commandExecution, 10),
 	}
+	shell.isAlive.Store(true)
 
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				fmt.Fprintf(os.Stderr, "Panic in shell command processor: %v\n", r)
-				shell.isAlive = false
-				close(shell.commandQueue)
+				shell.isAlive.Store(false)
 			}
 		}()
 		shell.processCommands()
 	}()
 
 	go func() {
-		err := cmd.Wait()
-		if err != nil {
-			// Log the error if needed
-		}
-		shell.isAlive = false
-		close(shell.commandQueue)
+		_ = cmd.Wait()
+		shell.isAlive.Store(false)
 	}()
 
 	return shell
@@ -227,7 +223,7 @@ func (s *PersistentShell) execCommand(command string, timeout time.Duration, ctx
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !s.isAlive {
+	if !s.isAlive.Load() {
 		return commandResult{
 			stderr:   "Shell is not alive",
 			exitCode: 1,
@@ -363,7 +359,7 @@ func (s *PersistentShell) killChildren() {
 }
 
 func (s *PersistentShell) Exec(ctx context.Context, command string, timeoutMs int) (string, string, int, bool, error) {
-	if !s.isAlive {
+	if !s.isAlive.Load() {
 		return "", "Shell is not alive", 1, false, errors.New("shell is not alive")
 	}
 
@@ -385,7 +381,7 @@ func (s *PersistentShell) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !s.isAlive {
+	if !s.isAlive.Swap(false) {
 		return
 	}
 
@@ -397,7 +393,6 @@ func (s *PersistentShell) Close() {
 	if s.cmd != nil && s.cmd.Process != nil {
 		_ = s.cmd.Process.Kill()
 	}
-	s.isAlive = false
 }
 
 func shellQuote(s string) string {

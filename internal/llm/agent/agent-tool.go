@@ -4,21 +4,26 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/opencode-ai/opencode/internal/config"
 	"github.com/opencode-ai/opencode/internal/llm/tools"
 	"github.com/opencode-ai/opencode/internal/llm/tools/shell"
 	"github.com/opencode-ai/opencode/internal/logging"
 	"github.com/opencode-ai/opencode/internal/lsp"
+	"github.com/opencode-ai/opencode/internal/memory"
 	"github.com/opencode-ai/opencode/internal/message"
+	"github.com/opencode-ai/opencode/internal/permission"
 	"github.com/opencode-ai/opencode/internal/pubsub"
 	"github.com/opencode-ai/opencode/internal/session"
 )
 
 type agentTool struct {
-	sessions   session.Service
-	messages   message.Service
-	lspClients map[string]*lsp.Client
+	sessions      session.Service
+	messages      message.Service
+	lspClients    map[string]*lsp.Client
+	permissions   permission.Service
+	memoryService memory.Service
 
 	// parentBroker allows forwarding subagent progress events to the parent agent's TUI
 	parentBroker *pubsub.Broker[AgentEvent]
@@ -32,17 +37,33 @@ const (
 )
 
 type AgentParams struct {
-	Prompt string `json:"prompt"`
+	Prompt    string `json:"prompt"`
+	AgentType string `json:"agent_type,omitempty"`
 }
 
 func (b *agentTool) Info() tools.ToolInfo {
 	return tools.ToolInfo{
-		Name:        AgentToolName,
-		Description: "Launch a new agent that has access to the following tools: GlobTool, GrepTool, LS, View. When you are searching for a keyword or file and are not confident that you will find the right match on the first try, use the Agent tool to perform the search for you. For example:\n\n- If you are searching for a keyword like \"config\" or \"logger\", or for questions like \"which file does X?\", the Agent tool is strongly recommended\n- If you want to read a specific file path, use the View or GlobTool tool instead of the Agent tool, to find the match more quickly\n- If you are searching for a specific class definition like \"class Foo\", use the GlobTool tool instead, to find the match more quickly\n\nUsage notes:\n1. Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses\n2. When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.\n3. Each agent invocation is stateless. You will not be able to send additional messages to the agent, nor will the agent be able to communicate with you outside of its final report. Therefore, your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.\n4. The agent's outputs should generally be trusted\n5. IMPORTANT: The agent can not use Bash, Replace, Edit, so can not modify files. If you want to use these tools, use them directly instead of going through the agent.",
+		Name: AgentToolName,
+		Description: "Launch a subordinate specialized agent to autonomously perform a focused task and report back with findings.\n\n" +
+			"AGENT TYPES (agent_type):\n" +
+			"- \"task\" (default): General exploration, codebase search, and symbol lookup (Glob, Grep, LS, View, FindSymbol).\n" +
+			"- \"reviewer\": Code review, security analysis, and architectural inspection (read-only tools + diagnostics + recall memory).\n" +
+			"- \"tester\": Test execution, verification, and regression runs (bash + test_runner + diagnostics + inspection tools).\n" +
+			"- \"debugger\": Root-cause diagnostics, symbol inspection, and test reproduction (bash + test_runner + diagnostics + symbols).\n\n" +
+			"Usage notes:\n" +
+			"1. Choose the appropriate agent_type for your objective (e.g. use 'reviewer' for code reviews, 'tester' to verify tests, 'debugger' for investigating failures).\n" +
+			"2. Launch multiple agents concurrently whenever possible to maximize performance.\n" +
+			"3. Each agent invocation is autonomous and returns a single summary report back to you.\n" +
+			"4. Provide detailed, unambiguous instructions in prompt so the subagent can complete the task independently.",
 		Parameters: map[string]any{
 			"prompt": map[string]any{
 				"type":        "string",
 				"description": "The task for the agent to perform",
+			},
+			"agent_type": map[string]any{
+				"type":        "string",
+				"enum":        []string{"task", "reviewer", "tester", "debugger"},
+				"description": "Specialist agent role: 'task' (general search), 'reviewer' (code review), 'tester' (run tests/bash), 'debugger' (root-cause diagnostics). Default is 'task'.",
 			},
 		},
 		Required: []string{"prompt"},
@@ -55,6 +76,19 @@ func truncateForDisplay(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+func (b *agentTool) resolveAgent(agentType string) (config.AgentName, []tools.BaseTool) {
+	switch strings.ToLower(strings.TrimSpace(agentType)) {
+	case "reviewer":
+		return config.AgentReviewer, ReviewerAgentTools(b.lspClients, b.memoryService)
+	case "tester":
+		return config.AgentTester, TesterAgentTools(b.permissions, b.lspClients, b.memoryService)
+	case "debugger":
+		return config.AgentDebugger, DebuggerAgentTools(b.permissions, b.lspClients, b.memoryService)
+	default:
+		return config.AgentTask, TaskAgentTools(b.lspClients)
+	}
 }
 
 func (b *agentTool) Run(ctx context.Context, call tools.ToolCall) (tools.ToolResponse, error) {
@@ -71,12 +105,14 @@ func (b *agentTool) Run(ctx context.Context, call tools.ToolCall) (tools.ToolRes
 		return tools.ToolResponse{}, fmt.Errorf("session_id and message_id are required")
 	}
 
-	agent, err := NewAgent(config.AgentTask, b.sessions, b.messages, TaskAgentTools(b.lspClients))
+	agentName, agentTools := b.resolveAgent(params.AgentType)
+	agent, err := NewAgent(agentName, b.sessions, b.messages, agentTools)
 	if err != nil {
 		return tools.ToolResponse{}, fmt.Errorf("error creating agent: %s", err)
 	}
 
-	session, err := b.sessions.CreateTaskSession(ctx, call.ID, sessionID, "New Agent Session")
+	sessionTitle := fmt.Sprintf("Agent (%s)", agentName)
+	session, err := b.sessions.CreateTaskSession(ctx, call.ID, sessionID, sessionTitle)
 	if err != nil {
 		return tools.ToolResponse{}, fmt.Errorf("error creating session: %s", err)
 	}
@@ -231,5 +267,29 @@ func NewAgentTool(
 		messages:     Messages,
 		lspClients:   LspClients,
 		parentBroker: broker,
+	}
+}
+
+// NewAgentToolWithPermissions creates an agentTool with permissions and memory service wired,
+// enabling specialist agents (tester, debugger, reviewer) to access appropriate tool sets.
+func NewAgentToolWithPermissions(
+	Sessions session.Service,
+	Messages message.Service,
+	LspClients map[string]*lsp.Client,
+	Broker *pubsub.Broker[AgentEvent],
+	Permissions permission.Service,
+	MemoryService ...memory.Service,
+) tools.BaseTool {
+	var mem memory.Service
+	if len(MemoryService) > 0 {
+		mem = MemoryService[0]
+	}
+	return &agentTool{
+		sessions:      Sessions,
+		messages:      Messages,
+		lspClients:    LspClients,
+		permissions:   Permissions,
+		memoryService: mem,
+		parentBroker:  Broker,
 	}
 }

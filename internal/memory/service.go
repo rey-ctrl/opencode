@@ -77,7 +77,7 @@ func (s *memoryService) Remember(ctx context.Context, projectPath, category, key
 	var existingID string
 	var createdAt int64
 	err := s.db.QueryRowContext(ctx,
-		"SELECT id, created_at FROM project_memories WHERE project_path = ? AND key = ?",
+		"SELECT id, created_at FROM project_memories WHERE project_path = ? AND key = ? COLLATE NOCASE",
 		cleanPath, key,
 	).Scan(&existingID, &createdAt)
 
@@ -143,12 +143,12 @@ func (s *memoryService) Recall(ctx context.Context, projectPath, query, category
 	args := []any{cleanPath}
 
 	if category != "" && category != "all" {
-		querySQL += " AND category = ?"
+		querySQL += " AND category = ? COLLATE NOCASE"
 		args = append(args, category)
 	}
 
 	if query != "" {
-		querySQL += " AND (key LIKE ? OR content LIKE ?)"
+		querySQL += " AND (key LIKE ? COLLATE NOCASE OR content LIKE ? COLLATE NOCASE)"
 		pattern := "%" + query + "%"
 		args = append(args, pattern, pattern)
 	}
@@ -189,7 +189,7 @@ func (s *memoryService) Get(ctx context.Context, projectPath, key string) (Memor
 
 	var m Memory
 	err := s.db.QueryRowContext(ctx,
-		"SELECT id, project_path, category, key, content, created_at, updated_at FROM project_memories WHERE project_path = ? AND key = ?",
+		"SELECT id, project_path, category, key, content, created_at, updated_at FROM project_memories WHERE project_path = ? AND key = ? COLLATE NOCASE",
 		cleanPath, strings.TrimSpace(key),
 	).Scan(&m.ID, &m.ProjectPath, &m.Category, &m.Key, &m.Content, &m.CreatedAt, &m.UpdatedAt)
 
@@ -219,7 +219,7 @@ func (s *memoryService) Forget(ctx context.Context, projectPath, key string) err
 	defer s.mu.Unlock()
 
 	res, err := s.db.ExecContext(ctx,
-		"DELETE FROM project_memories WHERE project_path = ? AND key = ?",
+		"DELETE FROM project_memories WHERE project_path = ? AND key = ? COLLATE NOCASE",
 		cleanPath, strings.TrimSpace(key),
 	)
 	if err != nil {
