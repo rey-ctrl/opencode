@@ -7,8 +7,11 @@ import (
 
 	"github.com/opencode-ai/opencode/internal/config"
 	"github.com/opencode-ai/opencode/internal/llm/tools"
+	"github.com/opencode-ai/opencode/internal/llm/tools/shell"
+	"github.com/opencode-ai/opencode/internal/logging"
 	"github.com/opencode-ai/opencode/internal/lsp"
 	"github.com/opencode-ai/opencode/internal/message"
+	"github.com/opencode-ai/opencode/internal/pubsub"
 	"github.com/opencode-ai/opencode/internal/session"
 )
 
@@ -16,10 +19,16 @@ type agentTool struct {
 	sessions   session.Service
 	messages   message.Service
 	lspClients map[string]*lsp.Client
+
+	// parentBroker allows forwarding subagent progress events to the parent agent's TUI
+	parentBroker *pubsub.Broker[AgentEvent]
 }
 
 const (
 	AgentToolName = "agent"
+
+	// Maximum length for tool input display in progress events
+	maxToolInputDisplayLen = 120
 )
 
 type AgentParams struct {
@@ -38,6 +47,14 @@ func (b *agentTool) Info() tools.ToolInfo {
 		},
 		Required: []string{"prompt"},
 	}
+}
+
+// truncateForDisplay truncates a string for display in progress events.
+func truncateForDisplay(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 func (b *agentTool) Run(ctx context.Context, call tools.ToolCall) (tools.ToolResponse, error) {
@@ -63,14 +80,62 @@ func (b *agentTool) Run(ctx context.Context, call tools.ToolCall) (tools.ToolRes
 	if err != nil {
 		return tools.ToolResponse{}, fmt.Errorf("error creating session: %s", err)
 	}
+	defer shell.CloseShellForSession(session.ID)
+
+	// Subscribe to subagent's message stream for progress events
+	progressCtx, progressCancel := context.WithCancel(ctx)
+	defer progressCancel()
+
+	if b.parentBroker != nil {
+		// Publish initial "subagent started" progress
+		b.parentBroker.Publish(pubsub.CreatedEvent, AgentEvent{
+			Type: AgentEventTypeSubagentProgress,
+			SubagentProgress: &SubagentProgressInfo{
+				SubagentSessionID: session.ID,
+				ParentSessionID:   sessionID,
+				Status:            "started",
+			},
+		})
+
+		// Subscribe to subagent's messages to forward tool activity
+		msgSub := b.messages.Subscribe(progressCtx)
+		go b.forwardSubagentProgress(progressCtx, msgSub, session.ID, sessionID)
+	}
 
 	done, err := agent.Run(ctx, session.ID, params.Prompt)
 	if err != nil {
 		return tools.ToolResponse{}, fmt.Errorf("error generating agent: %s", err)
 	}
 	result := <-done
+
+	// Cancel progress subscription
+	progressCancel()
+
 	if result.Error != nil {
+		// Publish error progress
+		if b.parentBroker != nil {
+			b.parentBroker.Publish(pubsub.UpdatedEvent, AgentEvent{
+				Type: AgentEventTypeSubagentProgress,
+				SubagentProgress: &SubagentProgressInfo{
+					SubagentSessionID: session.ID,
+					ParentSessionID:   sessionID,
+					Status:            "error",
+				},
+			})
+		}
 		return tools.ToolResponse{}, fmt.Errorf("error generating agent: %s", result.Error)
+	}
+
+	// Publish completion progress
+	if b.parentBroker != nil {
+		b.parentBroker.Publish(pubsub.UpdatedEvent, AgentEvent{
+			Type: AgentEventTypeSubagentProgress,
+			SubagentProgress: &SubagentProgressInfo{
+				SubagentSessionID: session.ID,
+				ParentSessionID:   sessionID,
+				Status:            "completed",
+			},
+		})
 	}
 
 	response := result.Message
@@ -96,14 +161,75 @@ func (b *agentTool) Run(ctx context.Context, call tools.ToolCall) (tools.ToolRes
 	return tools.NewTextResponse(response.Content().String()), nil
 }
 
+// forwardSubagentProgress listens for message events from the subagent session
+// and publishes corresponding SubagentProgress events to the parent broker.
+func (b *agentTool) forwardSubagentProgress(
+	ctx context.Context,
+	msgChan <-chan pubsub.Event[message.Message],
+	subagentSessionID, parentSessionID string,
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event, ok := <-msgChan:
+			if !ok {
+				return
+			}
+			// Only forward messages belonging to our subagent session
+			if event.Payload.SessionID != subagentSessionID {
+				continue
+			}
+
+			// Forward tool calls as progress
+			if event.Payload.Role == message.Assistant {
+				for _, tc := range event.Payload.ToolCalls() {
+					b.parentBroker.Publish(pubsub.UpdatedEvent, AgentEvent{
+						Type: AgentEventTypeSubagentProgress,
+						SubagentProgress: &SubagentProgressInfo{
+							SubagentSessionID: subagentSessionID,
+							ParentSessionID:   parentSessionID,
+							ToolName:          tc.Name,
+							ToolInput:         truncateForDisplay(tc.Input, maxToolInputDisplayLen),
+							Status:            "running_tool",
+						},
+					})
+				}
+
+				// Forward text deltas
+				textContent := event.Payload.Content().String()
+				if textContent != "" && len(event.Payload.ToolCalls()) == 0 {
+					b.parentBroker.Publish(pubsub.UpdatedEvent, AgentEvent{
+						Type: AgentEventTypeSubagentProgress,
+						SubagentProgress: &SubagentProgressInfo{
+							SubagentSessionID: subagentSessionID,
+							ParentSessionID:   parentSessionID,
+							TextDelta:         truncateForDisplay(textContent, 200),
+							Status:            "streaming",
+						},
+					})
+				}
+			}
+		}
+	}
+}
+
 func NewAgentTool(
 	Sessions session.Service,
 	Messages message.Service,
 	LspClients map[string]*lsp.Client,
+	parentBroker ...*pubsub.Broker[AgentEvent],
 ) tools.BaseTool {
+	var broker *pubsub.Broker[AgentEvent]
+	if len(parentBroker) > 0 && parentBroker[0] != nil {
+		broker = parentBroker[0]
+	} else {
+		logging.Debug("NewAgentTool: no parent broker provided, subagent progress streaming disabled")
+	}
 	return &agentTool{
-		sessions:   Sessions,
-		messages:   Messages,
-		lspClients: LspClients,
+		sessions:     Sessions,
+		messages:     Messages,
+		lspClients:   LspClients,
+		parentBroker: broker,
 	}
 }

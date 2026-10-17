@@ -23,19 +23,56 @@ func GetAgentPrompt(agentName config.AgentName, provider models.ModelProvider) s
 		basePrompt = TaskPrompt(provider)
 	case config.AgentSummarizer:
 		basePrompt = SummarizerPrompt(provider)
+	case config.AgentReviewer:
+		basePrompt = ReviewerPrompt(provider)
+	case config.AgentTester:
+		basePrompt = TesterPrompt(provider)
+	case config.AgentDebugger:
+		basePrompt = DebuggerPrompt(provider)
+	case config.AgentArchitect:
+		basePrompt = ArchitectPrompt(provider)
 	default:
 		basePrompt = "You are a helpful assistant"
 	}
 
-	if agentName == config.AgentCoder || agentName == config.AgentTask {
+	if agentName == config.AgentCoder || agentName == config.AgentTask ||
+		agentName == config.AgentReviewer || agentName == config.AgentTester ||
+		agentName == config.AgentDebugger || agentName == config.AgentArchitect {
 		// Add context from project-specific instruction files if they exist
 		contextContent := getContextFromPaths()
 		logging.Debug("Context content", "Context", contextContent)
 		if contextContent != "" {
-			return fmt.Sprintf("%s\n\n# Project-Specific Context\n Make sure to follow the instructions in the context below\n%s", basePrompt, contextContent)
+			basePrompt = fmt.Sprintf("%s\n\n# Project-Specific Context\n Make sure to follow the instructions in the context below\n%s", basePrompt, contextContent)
+		}
+
+		// Add persistent project memories if available
+		workDir := config.WorkingDirectory()
+		if memSummary := getMemorySummary(workDir); memSummary != "" {
+			basePrompt = fmt.Sprintf("%s\n\n# Persistent Project Memories\n%s", basePrompt, memSummary)
 		}
 	}
 	return basePrompt
+}
+
+var (
+	memoryProviderMu sync.RWMutex
+	memoryProvider   func(projectPath string) string
+)
+
+// SetMemoryProvider sets the callback function to fetch persistent project memories.
+func SetMemoryProvider(p func(projectPath string) string) {
+	memoryProviderMu.Lock()
+	defer memoryProviderMu.Unlock()
+	memoryProvider = p
+}
+
+func getMemorySummary(projectPath string) string {
+	memoryProviderMu.RLock()
+	defer memoryProviderMu.RUnlock()
+	if memoryProvider != nil {
+		return memoryProvider(projectPath)
+	}
+	return ""
 }
 
 var (
@@ -44,12 +81,14 @@ var (
 )
 
 func getContextFromPaths() string {
+	cfg := config.Get()
+	if cfg == nil {
+		return ""
+	}
+
 	onceContext.Do(func() {
-		var (
-			cfg          = config.Get()
-			workDir      = cfg.WorkingDir
-			contextPaths = cfg.ContextPaths
-		)
+		workDir := cfg.WorkingDir
+		contextPaths := cfg.ContextPaths
 
 		contextContent = processContextPaths(workDir, contextPaths)
 	})

@@ -11,6 +11,7 @@ import (
 	"github.com/opencode-ai/opencode/internal/diff"
 	"github.com/opencode-ai/opencode/internal/llm/tools"
 	"github.com/opencode-ai/opencode/internal/permission"
+	diffComponent "github.com/opencode-ai/opencode/internal/tui/components/diff"
 	"github.com/opencode-ai/opencode/internal/tui/layout"
 	"github.com/opencode-ai/opencode/internal/tui/styles"
 	"github.com/opencode-ai/opencode/internal/tui/theme"
@@ -40,13 +41,14 @@ type PermissionDialogCmp interface {
 }
 
 type permissionsMapping struct {
-	Left         key.Binding
-	Right        key.Binding
-	EnterSpace   key.Binding
-	Allow        key.Binding
-	AllowSession key.Binding
-	Deny         key.Binding
-	Tab          key.Binding
+	Left           key.Binding
+	Right          key.Binding
+	EnterSpace     key.Binding
+	Allow          key.Binding
+	AllowSession   key.Binding
+	Deny           key.Binding
+	Tab            key.Binding
+	ToggleDiffMode key.Binding
 }
 
 var permissionsKeys = permissionsMapping{
@@ -78,6 +80,10 @@ var permissionsKeys = permissionsMapping{
 		key.WithKeys("tab"),
 		key.WithHelp("tab", "switch options"),
 	),
+	ToggleDiffMode: key.NewBinding(
+		key.WithKeys("t"),
+		key.WithHelp("t", "toggle diff view (inline/side-by-side)"),
+	),
 }
 
 // permissionDialogCmp is the implementation of PermissionDialog
@@ -91,6 +97,7 @@ type permissionDialogCmp struct {
 
 	diffCache     map[string]string
 	markdownCache map[string]string
+	diffMode      diffComponent.ViewMode
 }
 
 func (p *permissionDialogCmp) Init() tea.Cmd {
@@ -109,6 +116,15 @@ func (p *permissionDialogCmp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		p.diffCache = make(map[string]string)
 	case tea.KeyMsg:
 		switch {
+		case key.Matches(msg, permissionsKeys.ToggleDiffMode):
+			if p.isDiffTool() {
+				if p.diffMode == diffComponent.ViewModeInline {
+					p.diffMode = diffComponent.ViewModeSideBySide
+				} else {
+					p.diffMode = diffComponent.ViewModeInline
+				}
+				return p, nil
+			}
 		case key.Matches(msg, permissionsKeys.Right) || key.Matches(msg, permissionsKeys.Tab):
 			p.selectedOption = (p.selectedOption + 1) % 3
 			return p, nil
@@ -229,18 +245,23 @@ func (p *permissionDialogCmp) renderHeader() string {
 	switch p.permission.ToolName {
 	case tools.BashToolName:
 		headerParts = append(headerParts, baseStyle.Foreground(t.TextMuted()).Width(p.width).Bold(true).Render("Command"))
-	case tools.EditToolName:
-		params := p.permission.Params.(tools.EditPermissionsParams)
+	case tools.EditToolName, tools.PatchToolName, tools.MultiEditToolName:
+		var filePath string
+		if params, ok := p.permission.Params.(tools.EditPermissionsParams); ok {
+			filePath = params.FilePath
+		}
 		fileKey := baseStyle.Foreground(t.TextMuted()).Bold(true).Render("File")
-		filePath := baseStyle.
+		filePathRendered := baseStyle.
 			Foreground(t.Text()).
-			Width(p.width - lipgloss.Width(fileKey)).
-			Render(fmt.Sprintf(": %s", params.FilePath))
+			Width(p.width - lipgloss.Width(fileKey) - 20).
+			Render(fmt.Sprintf(": %s", filePath))
+		modeBadge := baseStyle.Foreground(t.Accent()).Render(fmt.Sprintf(" [t: %s Diff]", p.diffMode.String()))
 		headerParts = append(headerParts,
 			lipgloss.JoinHorizontal(
 				lipgloss.Left,
 				fileKey,
-				filePath,
+				filePathRendered,
+				modeBadge,
 			),
 			baseStyle.Render(strings.Repeat(" ", p.width)),
 		)
@@ -250,13 +271,15 @@ func (p *permissionDialogCmp) renderHeader() string {
 		fileKey := baseStyle.Foreground(t.TextMuted()).Bold(true).Render("File")
 		filePath := baseStyle.
 			Foreground(t.Text()).
-			Width(p.width - lipgloss.Width(fileKey)).
+			Width(p.width - lipgloss.Width(fileKey) - 20).
 			Render(fmt.Sprintf(": %s", params.FilePath))
+		modeBadge := baseStyle.Foreground(t.Accent()).Render(fmt.Sprintf(" [t: %s Diff]", p.diffMode.String()))
 		headerParts = append(headerParts,
 			lipgloss.JoinHorizontal(
 				lipgloss.Left,
 				fileKey,
 				filePath,
+				modeBadge,
 			),
 			baseStyle.Render(strings.Repeat(" ", p.width)),
 		)
@@ -290,39 +313,45 @@ func (p *permissionDialogCmp) renderBashContent() string {
 	return ""
 }
 
+func (p *permissionDialogCmp) isDiffTool() bool {
+	switch p.permission.ToolName {
+	case tools.EditToolName, tools.PatchToolName, tools.WriteToolName, tools.MultiEditToolName:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *permissionDialogCmp) renderDiff(diffText string) string {
+	cacheKey := fmt.Sprintf("%s-%v", p.permission.ID, p.diffMode)
+	diffFormatted := p.GetOrSetDiff(cacheKey, func() (string, error) {
+		if p.diffMode == diffComponent.ViewModeSideBySide {
+			return diff.FormatDiff(diffText, diff.WithTotalWidth(p.contentViewPort.Width))
+		}
+		return diff.FormatInlineDiff(diffText, diff.WithInlineTotalWidth(p.contentViewPort.Width), diff.WithShowHunkHeader(true))
+	})
+
+	p.contentViewPort.SetContent(diffFormatted)
+	return p.styleViewport()
+}
+
 func (p *permissionDialogCmp) renderEditContent() string {
 	if pr, ok := p.permission.Params.(tools.EditPermissionsParams); ok {
-		diff := p.GetOrSetDiff(p.permission.ID, func() (string, error) {
-			return diff.FormatDiff(pr.Diff, diff.WithTotalWidth(p.contentViewPort.Width))
-		})
-
-		p.contentViewPort.SetContent(diff)
-		return p.styleViewport()
+		return p.renderDiff(pr.Diff)
 	}
 	return ""
 }
 
 func (p *permissionDialogCmp) renderPatchContent() string {
 	if pr, ok := p.permission.Params.(tools.EditPermissionsParams); ok {
-		diff := p.GetOrSetDiff(p.permission.ID, func() (string, error) {
-			return diff.FormatDiff(pr.Diff, diff.WithTotalWidth(p.contentViewPort.Width))
-		})
-
-		p.contentViewPort.SetContent(diff)
-		return p.styleViewport()
+		return p.renderDiff(pr.Diff)
 	}
 	return ""
 }
 
 func (p *permissionDialogCmp) renderWriteContent() string {
 	if pr, ok := p.permission.Params.(tools.WritePermissionsParams); ok {
-		// Use the cache for diff rendering
-		diff := p.GetOrSetDiff(p.permission.ID, func() (string, error) {
-			return diff.FormatDiff(pr.Diff, diff.WithTotalWidth(p.contentViewPort.Width))
-		})
-
-		p.contentViewPort.SetContent(diff)
-		return p.styleViewport()
+		return p.renderDiff(pr.Diff)
 	}
 	return ""
 }
@@ -410,6 +439,8 @@ func (p *permissionDialogCmp) render() string {
 		contentFinal = p.renderEditContent()
 	case tools.PatchToolName:
 		contentFinal = p.renderPatchContent()
+	case tools.MultiEditToolName:
+		contentFinal = p.renderEditContent()
 	case tools.WriteToolName:
 		contentFinal = p.renderWriteContent()
 	case tools.FetchToolName:
@@ -456,7 +487,7 @@ func (p *permissionDialogCmp) SetSize() tea.Cmd {
 	case tools.BashToolName:
 		p.width = int(float64(p.windowSize.Width) * 0.4)
 		p.height = int(float64(p.windowSize.Height) * 0.3)
-	case tools.EditToolName:
+	case tools.EditToolName, tools.PatchToolName, tools.MultiEditToolName:
 		p.width = int(float64(p.windowSize.Width) * 0.8)
 		p.height = int(float64(p.windowSize.Height) * 0.8)
 	case tools.WriteToolName:
@@ -518,5 +549,6 @@ func NewPermissionDialogCmp() PermissionDialogCmp {
 		selectedOption:  0, // Default to "Allow"
 		diffCache:       make(map[string]string),
 		markdownCache:   make(map[string]string),
+		diffMode:        diffComponent.ViewModeInline,
 	}
 }

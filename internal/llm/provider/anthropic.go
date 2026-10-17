@@ -470,3 +470,7 @@ func WithAnthropicShouldThinkFn(fn func(string) bool) AnthropicOption {
 		options.shouldThink = fn
 	}
 }
+
+func (a *anthropicClient) SetSystemMessage(msg string) {
+	a.providerOptions.systemMessage = msg
+}

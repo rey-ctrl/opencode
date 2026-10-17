@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/opencode-ai/opencode/internal/config"
@@ -176,6 +178,12 @@ func getEnvironmentInfo() string {
 	r, _ := ls.Run(context.Background(), tools.ToolCall{
 		Input: `{"path":"."}`,
 	})
+
+	gitCtx := ""
+	if isGit {
+		gitCtx = "\n" + getGitContext(cwd)
+	}
+
 	return fmt.Sprintf(`Here is useful information about the environment you are running in:
 <env>
 Working directory: %s
@@ -185,8 +193,8 @@ Today's date: %s
 </env>
 <project>
 %s
-</project>
-		`, cwd, boolToYesNo(isGit), platform, date, r.Content)
+</project>%s
+		`, cwd, boolToYesNo(isGit), platform, date, r.Content, gitCtx)
 }
 
 func isGitRepo(dir string) bool {
@@ -194,8 +202,86 @@ func isGitRepo(dir string) bool {
 	return err == nil
 }
 
+// getGitContext returns a compact git context block for injection into the system prompt.
+// It executes git commands with a strict timeout, hides console windows on Windows,
+// and gracefully falls back if git is not available or encounters an error.
+func getGitContext(cwd string) string {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		return ""
+	}
+
+	runGit := func(args ...string) string {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, gitPath, append([]string{"-C", cwd}, args...)...)
+		prepareCmd(cmd)
+		out, err := cmd.Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	// Single call to status --porcelain=v1 -b captures branch + staged/unstaged changes
+	statusOut := runGit("status", "--porcelain=v1", "-b")
+	if statusOut == "" {
+		return ""
+	}
+
+	lines := strings.Split(statusOut, "\n")
+	branch := ""
+	stagedCount := 0
+	unstagedCount := 0
+
+	for i, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		if i == 0 && strings.HasPrefix(line, "## ") {
+			b := strings.TrimPrefix(line, "## ")
+			if idx := strings.Index(b, "..."); idx != -1 {
+				branch = b[:idx]
+			} else if idx := strings.Index(b, " "); idx != -1 {
+				branch = b[:idx]
+			} else {
+				branch = b
+			}
+			continue
+		}
+		if len(line) < 2 {
+			continue
+		}
+		indexStatus := line[0]
+		workTreeStatus := line[1]
+
+		if indexStatus != ' ' && indexStatus != '?' {
+			stagedCount++
+		}
+		if workTreeStatus != ' ' || indexStatus == '?' {
+			unstagedCount++
+		}
+	}
+
+	if branch == "" {
+		branch = runGit("rev-parse", "--abbrev-ref", "HEAD")
+	}
+
+	recentCommits := runGit("log", "--oneline", "-5")
+
+	return fmt.Sprintf(`<git_context>
+Branch: %s
+Staged changes: %d file(s)
+Unstaged/untracked changes: %d file(s)
+Recent commits:
+%s
+</git_context>`, branch, stagedCount, unstagedCount, recentCommits)
+}
+
 func lspInformation() string {
 	cfg := config.Get()
+	if cfg == nil {
+		return ""
+	}
 	hasLSP := false
 	for _, v := range cfg.LSP {
 		if !v.Disabled {

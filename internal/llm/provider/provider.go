@@ -56,6 +56,8 @@ type Provider interface {
 	StreamResponse(ctx context.Context, messages []message.Message, tools []tools.BaseTool) <-chan ProviderEvent
 
 	Model() models.Model
+
+	SetSystemMessage(systemMessage string)
 }
 
 type providerClientOptions struct {
@@ -76,6 +78,7 @@ type ProviderClientOption func(*providerClientOptions)
 type ProviderClient interface {
 	send(ctx context.Context, messages []message.Message, tools []tools.BaseTool) (*ProviderResponse, error)
 	stream(ctx context.Context, messages []message.Message, tools []tools.BaseTool) <-chan ProviderEvent
+	SetSystemMessage(systemMessage string)
 }
 
 type baseProvider[C ProviderClient] struct {
@@ -190,6 +193,11 @@ func (p *baseProvider[C]) Model() models.Model {
 func (p *baseProvider[C]) StreamResponse(ctx context.Context, messages []message.Message, tools []tools.BaseTool) <-chan ProviderEvent {
 	messages = p.cleanMessages(messages)
 	return p.client.stream(ctx, messages, tools)
+}
+
+func (p *baseProvider[C]) SetSystemMessage(systemMessage string) {
+	p.options.systemMessage = systemMessage
+	p.client.SetSystemMessage(systemMessage)
 }
 
 func WithAPIKey(apiKey string) ProviderClientOption {

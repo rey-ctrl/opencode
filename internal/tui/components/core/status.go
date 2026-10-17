@@ -23,18 +23,35 @@ type StatusCmp interface {
 	tea.Model
 }
 
+// SubagentProgressMsg carries subagent progress information to the status bar
+type SubagentProgressMsg struct {
+	Status  string // "started", "running_tool", "streaming", "completed", "error"
+	Message string
+}
+
+// ClearSubagentStatusMsg clears the subagent status text
+type ClearSubagentStatusMsg struct{}
+
 type statusCmp struct {
-	info       util.InfoMsg
-	width      int
-	messageTTL time.Duration
-	lspClients map[string]*lsp.Client
-	session    session.Session
+	info           util.InfoMsg
+	width          int
+	messageTTL     time.Duration
+	lspClients     map[string]*lsp.Client
+	session        session.Session
+	subagentStatus string
 }
 
 // clearMessageCmd is a command that clears status messages after a timeout
 func (m statusCmp) clearMessageCmd(ttl time.Duration) tea.Cmd {
 	return tea.Tick(ttl, func(time.Time) tea.Msg {
 		return util.ClearStatusMsg{}
+	})
+}
+
+// clearSubagentCmd clears subagent status after a timeout
+func (m statusCmp) clearSubagentCmd(ttl time.Duration) tea.Cmd {
+	return tea.Tick(ttl, func(time.Time) tea.Msg {
+		return ClearSubagentStatusMsg{}
 	})
 }
 
@@ -66,6 +83,15 @@ func (m statusCmp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.clearMessageCmd(ttl)
 	case util.ClearStatusMsg:
 		m.info = util.InfoMsg{}
+	case SubagentProgressMsg:
+		m.subagentStatus = msg.Message
+		if msg.Status == "completed" || msg.Status == "error" {
+			return m, m.clearSubagentCmd(3 * time.Second)
+		}
+		return m, nil
+	case ClearSubagentStatusMsg:
+		m.subagentStatus = ""
+		return m, nil
 	}
 	return m, nil
 }
@@ -166,6 +192,20 @@ func (m statusCmp) View() string {
 			msg = msg[:infoWidth] + "..."
 		}
 		status += infoStyle.Render(msg)
+	} else if m.subagentStatus != "" {
+		subStyle := styles.Padded().
+			Foreground(t.BackgroundDarker()).
+			Background(t.Accent()).
+			Width(availableWidht)
+
+		subWidth := availableWidht - 10
+		msg := m.subagentStatus
+		if subWidth <= 0 {
+			msg = ""
+		} else if len(msg) > subWidth {
+			msg = msg[:subWidth] + "..."
+		}
+		status += subStyle.Render(msg)
 	} else {
 		status += styles.Padded().
 			Foreground(t.Text()).

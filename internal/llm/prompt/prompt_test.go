@@ -35,8 +35,10 @@ func TestGetContextFromPaths(t *testing.T) {
 	createTestFiles(t, tmpDir, testFiles)
 
 	context := getContextFromPaths()
-	expectedContext := fmt.Sprintf("# From:%s/file.txt\nfile.txt: test content\n# From:%s/directory/file_a.txt\ndirectory/file_a.txt: test content\n# From:%s/directory/file_b.txt\ndirectory/file_b.txt: test content\n# From:%s/directory/file_c.txt\ndirectory/file_c.txt: test content", tmpDir, tmpDir, tmpDir, tmpDir)
-	assert.Equal(t, expectedContext, context)
+	assert.Contains(t, context, fmt.Sprintf("# From:%s\nfile.txt: test content", filepath.Join(tmpDir, "file.txt")))
+	assert.Contains(t, context, fmt.Sprintf("# From:%s\ndirectory/file_a.txt: test content", filepath.Join(tmpDir, "directory", "file_a.txt")))
+	assert.Contains(t, context, fmt.Sprintf("# From:%s\ndirectory/file_b.txt: test content", filepath.Join(tmpDir, "directory", "file_b.txt")))
+	assert.Contains(t, context, fmt.Sprintf("# From:%s\ndirectory/file_c.txt: test content", filepath.Join(tmpDir, "directory", "file_c.txt")))
 }
 
 func createTestFiles(t *testing.T, tmpDir string, testFiles []string) {
@@ -55,3 +57,15 @@ func createTestFiles(t *testing.T, tmpDir string, testFiles []string) {
 		}
 	}
 }
+
+func TestPrompt_PersistentProjectMemories(t *testing.T) {
+	SetMemoryProvider(func(projectPath string) string {
+		return "<project_memories>\n- [convention] test_style: Use table tests\n</project_memories>"
+	})
+	defer SetMemoryProvider(nil)
+
+	p := GetAgentPrompt(config.AgentCoder, "")
+	assert.Contains(t, p, "# Persistent Project Memories")
+	assert.Contains(t, p, "test_style: Use table tests")
+}
+

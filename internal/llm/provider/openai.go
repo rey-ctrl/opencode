@@ -423,3 +423,7 @@ func WithReasoningEffort(effort string) OpenAIOption {
 		options.reasoningEffort = defaultReasoningEffort
 	}
 }
+
+func (o *openaiClient) SetSystemMessage(msg string) {
+	o.providerOptions.systemMessage = msg
+}

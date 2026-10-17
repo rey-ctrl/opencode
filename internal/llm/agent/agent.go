@@ -29,10 +29,21 @@ var (
 type AgentEventType string
 
 const (
-	AgentEventTypeError     AgentEventType = "error"
-	AgentEventTypeResponse  AgentEventType = "response"
-	AgentEventTypeSummarize AgentEventType = "summarize"
+	AgentEventTypeError            AgentEventType = "error"
+	AgentEventTypeResponse         AgentEventType = "response"
+	AgentEventTypeSummarize        AgentEventType = "summarize"
+	AgentEventTypeSubagentProgress AgentEventType = "subagent_progress"
 )
+
+// SubagentProgressInfo contains real-time progress details from a running subagent.
+type SubagentProgressInfo struct {
+	SubagentSessionID string // The task session ID of the subagent
+	ParentSessionID   string // The parent session that spawned this subagent
+	ToolName          string // Name of the tool currently being executed (empty if streaming text)
+	ToolInput         string // Truncated input to the tool for display
+	TextDelta         string // Text content delta being streamed
+	Status            string // Human-readable status: "running_tool", "streaming", "completed", "error"
+}
 
 type AgentEvent struct {
 	Type    AgentEventType
@@ -43,6 +54,9 @@ type AgentEvent struct {
 	SessionID string
 	Progress  string
 	Done      bool
+
+	// When subagent progress
+	SubagentProgress *SubagentProgressInfo
 }
 
 type Service interface {
@@ -61,6 +75,7 @@ type agent struct {
 	sessions session.Service
 	messages message.Service
 
+	name     config.AgentName
 	tools    []tools.BaseTool
 	provider provider.Provider
 
@@ -75,6 +90,7 @@ func NewAgent(
 	sessions session.Service,
 	messages message.Service,
 	agentTools []tools.BaseTool,
+	broker ...*pubsub.Broker[AgentEvent],
 ) (Service, error) {
 	agentProvider, err := createAgentProvider(agentName)
 	if err != nil {
@@ -96,8 +112,17 @@ func NewAgent(
 		}
 	}
 
+	// Use externally provided broker or create a new one
+	var eventBroker *pubsub.Broker[AgentEvent]
+	if len(broker) > 0 && broker[0] != nil {
+		eventBroker = broker[0]
+	} else {
+		eventBroker = pubsub.NewBroker[AgentEvent]()
+	}
+
 	agent := &agent{
-		Broker:            pubsub.NewBroker[AgentEvent](),
+		Broker:            eventBroker,
+		name:              agentName,
 		provider:          agentProvider,
 		messages:          messages,
 		sessions:          sessions,
@@ -321,6 +346,14 @@ func (a *agent) createUserMessage(ctx context.Context, sessionID, content string
 
 func (a *agent) streamAndHandleEvents(ctx context.Context, sessionID string, msgHistory []message.Message) (message.Message, *message.Message, error) {
 	ctx = context.WithValue(ctx, tools.SessionIDContextKey, sessionID)
+
+	// Dynamically refresh environment context (git branch, dirty status, recent commits, project memories)
+	// before each turn
+	if a.provider != nil && a.name != "" {
+		freshPrompt := prompt.GetAgentPrompt(a.name, a.provider.Model().Provider)
+		a.provider.SetSystemMessage(freshPrompt)
+	}
+
 	eventChan := a.provider.StreamResponse(ctx, msgHistory, a.tools)
 
 	assistantMsg, err := a.messages.Create(ctx, sessionID, message.CreateMessageParams{
@@ -349,11 +382,135 @@ func (a *agent) streamAndHandleEvents(ctx context.Context, sessionID string, msg
 
 	toolResults := make([]message.ToolResult, len(assistantMsg.ToolCalls()))
 	toolCalls := assistantMsg.ToolCalls()
+
+	type queuedToolCall struct {
+		index int
+		call  message.ToolCall
+		tool  tools.BaseTool
+	}
+
+	executeSingleCall := func(idx int, call message.ToolCall, tool tools.BaseTool) bool {
+		if tool == nil {
+			toolResults[idx] = message.ToolResult{
+				ToolCallID: call.ID,
+				Content:    fmt.Sprintf("Tool not found: %s", call.Name),
+				IsError:    true,
+			}
+			return true
+		}
+
+		toolResult, toolErr := a.executeToolWithRetry(ctx, tool, tools.ToolCall{
+			ID:    call.ID,
+			Name:  call.Name,
+			Input: call.Input,
+		})
+		if toolErr != nil {
+			if errors.Is(toolErr, permission.ErrorPermissionDenied) {
+				toolResults[idx] = message.ToolResult{
+					ToolCallID: call.ID,
+					Content:    "Permission denied",
+					IsError:    true,
+				}
+				for j := idx + 1; j < len(toolCalls); j++ {
+					toolResults[j] = message.ToolResult{
+						ToolCallID: toolCalls[j].ID,
+						Content:    "Tool execution canceled by user",
+						IsError:    true,
+					}
+				}
+				a.finishMessage(ctx, &assistantMsg, message.FinishReasonPermissionDenied)
+				return false
+			}
+		}
+		toolResults[idx] = message.ToolResult{
+			ToolCallID: call.ID,
+			Content:    toolResult.Content,
+			Metadata:   toolResult.Metadata,
+			IsError:    toolResult.IsError,
+		}
+		return true
+	}
+
+	executeReadOnlyBatch := func(batch []queuedToolCall) bool {
+		if len(batch) == 0 {
+			return true
+		}
+		if len(batch) == 1 {
+			return executeSingleCall(batch[0].index, batch[0].call, batch[0].tool)
+		}
+
+		var wg sync.WaitGroup
+		var permDeniedIndex int = -1
+		var permMu sync.Mutex
+
+		for _, item := range batch {
+			wg.Add(1)
+			go func(it queuedToolCall) {
+				defer wg.Done()
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				if it.tool == nil {
+					toolResults[it.index] = message.ToolResult{
+						ToolCallID: it.call.ID,
+						Content:    fmt.Sprintf("Tool not found: %s", it.call.Name),
+						IsError:    true,
+					}
+					return
+				}
+
+				res, err := a.executeToolWithRetry(ctx, it.tool, tools.ToolCall{
+					ID:    it.call.ID,
+					Name:  it.call.Name,
+					Input: it.call.Input,
+				})
+				if err != nil && errors.Is(err, permission.ErrorPermissionDenied) {
+					permMu.Lock()
+					if permDeniedIndex == -1 || it.index < permDeniedIndex {
+						permDeniedIndex = it.index
+					}
+					permMu.Unlock()
+					toolResults[it.index] = message.ToolResult{
+						ToolCallID: it.call.ID,
+						Content:    "Permission denied",
+						IsError:    true,
+					}
+					return
+				}
+
+				toolResults[it.index] = message.ToolResult{
+					ToolCallID: it.call.ID,
+					Content:    res.Content,
+					Metadata:   res.Metadata,
+					IsError:    res.IsError,
+				}
+			}(item)
+		}
+		wg.Wait()
+
+		if permDeniedIndex != -1 {
+			for j := permDeniedIndex + 1; j < len(toolCalls); j++ {
+				toolResults[j] = message.ToolResult{
+					ToolCallID: toolCalls[j].ID,
+					Content:    "Tool execution canceled by user",
+					IsError:    true,
+				}
+			}
+			a.finishMessage(ctx, &assistantMsg, message.FinishReasonPermissionDenied)
+			return false
+		}
+		return true
+	}
+
+	var currentReadOnlyBatch []queuedToolCall
+
 	for i, toolCall := range toolCalls {
 		select {
 		case <-ctx.Done():
 			a.finishMessage(context.Background(), &assistantMsg, message.FinishReasonCanceled)
-			// Make all future tool calls cancelled
 			for j := i; j < len(toolCalls); j++ {
 				toolResults[j] = message.ToolResult{
 					ToolCallID: toolCalls[j].ID,
@@ -363,59 +520,42 @@ func (a *agent) streamAndHandleEvents(ctx context.Context, sessionID string, msg
 			}
 			goto out
 		default:
-			// Continue processing
-			var tool tools.BaseTool
-			for _, availableTool := range a.tools {
-				if availableTool.Info().Name == toolCall.Name {
-					tool = availableTool
-					break
+		}
+
+		var tool tools.BaseTool
+		for _, availableTool := range a.tools {
+			if availableTool.Info().Name == toolCall.Name {
+				tool = availableTool
+				break
+			}
+		}
+
+		if tool != nil && tools.IsToolReadOnly(tool) {
+			currentReadOnlyBatch = append(currentReadOnlyBatch, queuedToolCall{
+				index: i,
+				call:  toolCall,
+				tool:  tool,
+			})
+		} else {
+			// Flush any pending read-only batch before executing this mutating/unknown tool
+			if len(currentReadOnlyBatch) > 0 {
+				if !executeReadOnlyBatch(currentReadOnlyBatch) {
+					goto out
 				}
-				// Monkey patch for Copilot Sonnet-4 tool repetition obfuscation
-				// if strings.HasPrefix(toolCall.Name, availableTool.Info().Name) &&
-				// 	strings.HasPrefix(toolCall.Name, availableTool.Info().Name+availableTool.Info().Name) {
-				// 	tool = availableTool
-				// 	break
-				// }
+				currentReadOnlyBatch = currentReadOnlyBatch[:0]
 			}
 
-			// Tool not found
-			if tool == nil {
-				toolResults[i] = message.ToolResult{
-					ToolCallID: toolCall.ID,
-					Content:    fmt.Sprintf("Tool not found: %s", toolCall.Name),
-					IsError:    true,
-				}
-				continue
+			// Execute mutating/atomic tool serially
+			if !executeSingleCall(i, toolCall, tool) {
+				goto out
 			}
-			toolResult, toolErr := tool.Run(ctx, tools.ToolCall{
-				ID:    toolCall.ID,
-				Name:  toolCall.Name,
-				Input: toolCall.Input,
-			})
-			if toolErr != nil {
-				if errors.Is(toolErr, permission.ErrorPermissionDenied) {
-					toolResults[i] = message.ToolResult{
-						ToolCallID: toolCall.ID,
-						Content:    "Permission denied",
-						IsError:    true,
-					}
-					for j := i + 1; j < len(toolCalls); j++ {
-						toolResults[j] = message.ToolResult{
-							ToolCallID: toolCalls[j].ID,
-							Content:    "Tool execution canceled by user",
-							IsError:    true,
-						}
-					}
-					a.finishMessage(ctx, &assistantMsg, message.FinishReasonPermissionDenied)
-					break
-				}
-			}
-			toolResults[i] = message.ToolResult{
-				ToolCallID: toolCall.ID,
-				Content:    toolResult.Content,
-				Metadata:   toolResult.Metadata,
-				IsError:    toolResult.IsError,
-			}
+		}
+	}
+
+	// Flush any remaining read-only tool calls
+	if len(currentReadOnlyBatch) > 0 {
+		if !executeReadOnlyBatch(currentReadOnlyBatch) {
+			goto out
 		}
 	}
 out:
@@ -440,6 +580,36 @@ out:
 func (a *agent) finishMessage(ctx context.Context, msg *message.Message, finishReson message.FinishReason) {
 	msg.AddFinish(finishReson)
 	_ = a.messages.Update(ctx, *msg)
+}
+
+// executeToolWithRetry runs a tool with up to 2 automatic retries on transient
+// failures. PermissionDenied errors are never retried since they require user
+// action. Backoff starts at 100 ms and doubles on each attempt.
+func (a *agent) executeToolWithRetry(ctx context.Context, tool tools.BaseTool, call tools.ToolCall) (tools.ToolResponse, error) {
+	const maxRetries = 2
+	backoff := 100 * time.Millisecond
+
+	var result tools.ToolResponse
+	var err error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		result, err = tool.Run(ctx, call)
+		if err == nil && !result.IsError {
+			return result, nil
+		}
+		// Never retry permission-denied — user must explicitly allow the action.
+		if errors.Is(err, permission.ErrorPermissionDenied) {
+			return result, err
+		}
+		if attempt < maxRetries {
+			select {
+			case <-ctx.Done():
+				return tools.ToolResponse{}, ctx.Err()
+			case <-time.After(backoff):
+				backoff *= 2
+			}
+		}
+	}
+	return result, err
 }
 
 func (a *agent) processEvent(ctx context.Context, sessionID string, assistantMsg *message.Message, event provider.ProviderEvent) error {

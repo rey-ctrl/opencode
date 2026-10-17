@@ -327,6 +327,42 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, util.ReportError(payload.Error)
 		}
 
+		if payload.Type == agent.AgentEventTypeSubagentProgress && payload.SubagentProgress != nil {
+			prog := payload.SubagentProgress
+			var statusText string
+			switch prog.Status {
+			case "started":
+				statusText = "🤖 Subagent: starting..."
+			case "running_tool":
+				if prog.ToolName != "" {
+					if prog.ToolInput != "" {
+						statusText = fmt.Sprintf("🤖 Subagent: [%s] %s", prog.ToolName, prog.ToolInput)
+					} else {
+						statusText = fmt.Sprintf("🤖 Subagent: running %s...", prog.ToolName)
+					}
+				} else {
+					statusText = "🤖 Subagent: running tool..."
+				}
+			case "streaming":
+				if prog.TextDelta != "" {
+					statusText = fmt.Sprintf("🤖 Subagent: %s", prog.TextDelta)
+				} else {
+					statusText = "🤖 Subagent: responding..."
+				}
+			case "completed":
+				statusText = "🤖 Subagent: task completed"
+			case "error":
+				statusText = "🤖 Subagent: execution error"
+			}
+
+			s, cmd := a.status.Update(core.SubagentProgressMsg{
+				Status:  prog.Status,
+				Message: statusText,
+			})
+			a.status = s.(core.StatusCmp)
+			return a, cmd
+		}
+
 		a.compactingMessage = payload.Progress
 
 		if payload.Done && payload.Type == agent.AgentEventTypeSummarize {

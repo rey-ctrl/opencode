@@ -669,3 +669,7 @@ func WithCopilotBearerToken(bearerToken string) CopilotOption {
 	}
 }
 
+func (c *copilotClient) SetSystemMessage(msg string) {
+	c.providerOptions.systemMessage = msg
+}
+

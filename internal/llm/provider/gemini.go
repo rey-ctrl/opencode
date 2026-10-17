@@ -552,3 +552,7 @@ func contains(s string, substrs ...string) bool {
 	}
 	return false
 }
+
+func (g *geminiClient) SetSystemMessage(msg string) {
+	g.providerOptions.systemMessage = msg
+}

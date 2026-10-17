@@ -121,6 +121,12 @@ func escapeRegexPattern(pattern string) string {
 	return escaped
 }
 
+func (g *grepTool) Capability() ToolCapability {
+	return ToolCapability{
+		IsReadOnly: true,
+	}
+}
+
 func (g *grepTool) Run(ctx context.Context, call ToolCall) (ToolResponse, error) {
 	var params GrepParams
 	if err := json.Unmarshal([]byte(call.Input), &params); err != nil {

@@ -41,6 +41,12 @@ const (
 	AgentSummarizer AgentName = "summarizer"
 	AgentTask       AgentName = "task"
 	AgentTitle      AgentName = "title"
+
+	// Specialist agent roles
+	AgentReviewer  AgentName = "reviewer"
+	AgentTester    AgentName = "tester"
+	AgentDebugger  AgentName = "debugger"
+	AgentArchitect AgentName = "architect"
 )
 
 // Agent defines configuration for different LLM models and their token limits.
@@ -80,6 +86,16 @@ type ShellConfig struct {
 	Args []string `json:"args,omitempty"`
 }
 
+// BashConfig defines per-project overrides for bash tool security controls.
+type BashConfig struct {
+	// AllowedExtraCommands extends the default ban list with commands that are
+	// explicitly allowed for this project (e.g. ["curl", "wget"]).
+	AllowedExtraCommands []string `json:"allowedExtraCommands,omitempty"`
+	// BannedCommands overrides the default ban list entirely. When non-empty,
+	// only commands listed here will be blocked.
+	BannedCommands []string `json:"bannedCommands,omitempty"`
+}
+
 // Config is the main configuration structure for the application.
 type Config struct {
 	Data         Data                              `json:"data"`
@@ -93,6 +109,7 @@ type Config struct {
 	ContextPaths []string                          `json:"contextPaths,omitempty"`
 	TUI          TUIConfig                         `json:"tui"`
 	Shell        ShellConfig                       `json:"shell,omitempty"`
+	Bash         BashConfig                        `json:"bash,omitempty"`
 	AutoCompact  bool                              `json:"autoCompact,omitempty"`
 }
 
@@ -870,8 +887,11 @@ func Get() *Config {
 
 // WorkingDirectory returns the current working directory from the configuration.
 func WorkingDirectory() string {
-	if cfg == nil {
-		panic("config not loaded")
+	if cfg == nil || cfg.WorkingDir == "" {
+		if wd, err := os.Getwd(); err == nil {
+			return wd
+		}
+		return "."
 	}
 	return cfg.WorkingDir
 }

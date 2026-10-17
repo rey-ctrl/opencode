@@ -244,7 +244,31 @@ func (b *bashTool) Run(ctx context.Context, call ToolCall) (ToolResponse, error)
 	}
 
 	baseCmd := strings.Fields(params.Command)[0]
-	for _, banned := range bannedCommands {
+
+	// Build effective ban list: config can override entirely or extend defaults.
+	effectiveBanned := bannedCommands
+	if cfg := config.Get(); cfg != nil {
+		cfgBash := cfg.Bash
+		if len(cfgBash.BannedCommands) > 0 {
+			// Project supplies its own full list — use it verbatim.
+			effectiveBanned = cfgBash.BannedCommands
+		} else if len(cfgBash.AllowedExtraCommands) > 0 {
+			// Filter default ban list: remove any commands the project explicitly allows.
+			allowed := make(map[string]struct{}, len(cfgBash.AllowedExtraCommands))
+			for _, cmd := range cfgBash.AllowedExtraCommands {
+				allowed[strings.ToLower(cmd)] = struct{}{}
+			}
+			filtered := effectiveBanned[:0:0]
+			for _, cmd := range effectiveBanned {
+				if _, ok := allowed[strings.ToLower(cmd)]; !ok {
+					filtered = append(filtered, cmd)
+				}
+			}
+			effectiveBanned = filtered
+		}
+	}
+
+	for _, banned := range effectiveBanned {
 		if strings.EqualFold(baseCmd, banned) {
 			return NewTextErrorResponse(fmt.Sprintf("command '%s' is not allowed", baseCmd)), nil
 		}
@@ -284,7 +308,10 @@ func (b *bashTool) Run(ctx context.Context, call ToolCall) (ToolResponse, error)
 		}
 	}
 	startTime := time.Now()
-	shell := shell.GetPersistentShell(config.WorkingDirectory())
+	shell := shell.GetShellForSession(sessionID, config.WorkingDirectory())
+	if shell == nil {
+		return NewTextErrorResponse("failed to initialize persistent shell session"), nil
+	}
 	stdout, stderr, exitCode, interrupted, err := shell.Exec(ctx, params.Command, params.Timeout)
 	if err != nil {
 		return ToolResponse{}, fmt.Errorf("error executing command: %w", err)
@@ -331,12 +358,17 @@ func truncateOutput(content string) string {
 		return content
 	}
 
-	halfLength := MaxOutputLength / 2
-	start := content[:halfLength]
-	end := content[len(content)-halfLength:]
+	// Prioritise the tail of output (where errors and test failures appear).
+	// Keep 80 % from the end and 20 % from the start.
+	keepFromEnd := int(float64(MaxOutputLength) * 0.8)
+	keepFromStart := MaxOutputLength - keepFromEnd
 
-	truncatedLinesCount := countLines(content[halfLength : len(content)-halfLength])
-	return fmt.Sprintf("%s\n\n... [%d lines truncated] ...\n\n%s", start, truncatedLinesCount, end)
+	start := content[:keepFromStart]
+	end := content[len(content)-keepFromEnd:]
+
+	droppedLines := countLines(content[keepFromStart : len(content)-keepFromEnd])
+	return fmt.Sprintf("%s\n\n... [%d lines from middle omitted] ...\n\n%s",
+		start, droppedLines, end)
 }
 
 func countLines(s string) int {

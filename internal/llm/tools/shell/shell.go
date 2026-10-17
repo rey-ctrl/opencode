@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -17,7 +19,7 @@ import (
 
 type PersistentShell struct {
 	cmd          *exec.Cmd
-	stdin        *os.File
+	stdin        io.WriteCloser
 	isAlive      bool
 	cwd          string
 	mu           sync.Mutex
@@ -39,52 +41,137 @@ type commandResult struct {
 	err         error
 }
 
-var (
-	shellInstance     *PersistentShell
-	shellInstanceOnce sync.Once
-)
+type ShellPool struct {
+	mu     sync.RWMutex
+	shells map[string]*PersistentShell
+}
 
+var globalPool = &ShellPool{
+	shells: make(map[string]*PersistentShell),
+}
+
+// GetPersistentShell returns the shell for the default session (backwards compatibility).
 func GetPersistentShell(workingDir string) *PersistentShell {
-	shellInstanceOnce.Do(func() {
-		shellInstance = newPersistentShell(workingDir)
-	})
+	return GetShellForSession("default", workingDir)
+}
 
-	if shellInstance == nil {
-		shellInstance = newPersistentShell(workingDir)
-	} else if !shellInstance.isAlive {
-		shellInstance = newPersistentShell(shellInstance.cwd)
+// GetShellForSession returns an isolated PersistentShell for the given sessionID.
+// If the shell is dead or not yet created, a new persistent shell is started in workingDir.
+func GetShellForSession(sessionID, workingDir string) *PersistentShell {
+	if sessionID == "" {
+		sessionID = "default"
 	}
 
-	return shellInstance
+	globalPool.mu.RLock()
+	s, ok := globalPool.shells[sessionID]
+	if ok && s != nil && s.isAlive {
+		globalPool.mu.RUnlock()
+		return s
+	}
+	globalPool.mu.RUnlock()
+
+	globalPool.mu.Lock()
+	defer globalPool.mu.Unlock()
+
+	// Double check under write lock
+	if s, ok := globalPool.shells[sessionID]; ok && s != nil && s.isAlive {
+		return s
+	}
+
+	// Clean up previous dead shell if any
+	if s, ok := globalPool.shells[sessionID]; ok && s != nil {
+		s.Close()
+	}
+
+	s = newPersistentShell(workingDir)
+	globalPool.shells[sessionID] = s
+	return s
+}
+
+// CloseShellForSession terminates and unregisters the persistent shell for a given sessionID.
+func CloseShellForSession(sessionID string) {
+	if sessionID == "" {
+		sessionID = "default"
+	}
+	globalPool.mu.Lock()
+	defer globalPool.mu.Unlock()
+
+	if s, ok := globalPool.shells[sessionID]; ok && s != nil {
+		s.Close()
+		delete(globalPool.shells, sessionID)
+	}
+}
+
+// CloseAllShells terminates all active persistent shells in the pool.
+func CloseAllShells() {
+	globalPool.mu.Lock()
+	defer globalPool.mu.Unlock()
+
+	for id, s := range globalPool.shells {
+		if s != nil {
+			s.Close()
+		}
+		delete(globalPool.shells, id)
+	}
+}
+
+func resolveShellPath(cfg *config.Config) (string, []string) {
+	if cfg != nil && cfg.Shell.Path != "" {
+		args := cfg.Shell.Args
+		if len(args) == 0 {
+			args = []string{"-l"}
+		}
+		return cfg.Shell.Path, args
+	}
+
+	if envShell := os.Getenv("SHELL"); envShell != "" {
+		return envShell, []string{"-l"}
+	}
+
+	if runtime.GOOS == "windows" {
+		// 1. Look for bash in PATH (e.g. Git Bash, MSYS2)
+		if bashPath, err := exec.LookPath("bash"); err == nil {
+			return bashPath, []string{"-l"}
+		}
+		// 2. Look for standard Git for Windows installations
+		gitCandidates := []string{
+			`C:\Program Files\Git\bin\bash.exe`,
+			`C:\Program Files (x86)\Git\bin\bash.exe`,
+			`C:\Program Files\Git\usr\bin\bash.exe`,
+		}
+		for _, cand := range gitCandidates {
+			if _, err := os.Stat(cand); err == nil {
+				return cand, []string{"-l"}
+			}
+		}
+		// 3. Fallback to WSL bash if available
+		if wslPath, err := exec.LookPath("wsl"); err == nil {
+			return wslPath, []string{"bash", "-l"}
+		}
+		// 4. Fallback to PowerShell
+		if psPath, err := exec.LookPath("powershell"); err == nil {
+			return psPath, []string{"-NoLogo", "-NoExit", "-Command", "-"}
+		}
+		return "cmd.exe", []string{"/Q"}
+	}
+
+	// Unix defaults
+	if bashPath, err := exec.LookPath("bash"); err == nil {
+		return bashPath, []string{"-l"}
+	}
+	if shPath, err := exec.LookPath("sh"); err == nil {
+		return shPath, []string{"-l"}
+	}
+	return "/bin/bash", []string{"-l"}
 }
 
 func newPersistentShell(cwd string) *PersistentShell {
-	// Get shell configuration from config
 	cfg := config.Get()
-	
-	// Default to environment variable if config is not set or nil
-	var shellPath string
-	var shellArgs []string
-	
-	if cfg != nil {
-		shellPath = cfg.Shell.Path
-		shellArgs = cfg.Shell.Args
-	}
-	
-	if shellPath == "" {
-		shellPath = os.Getenv("SHELL")
-		if shellPath == "" {
-			shellPath = "/bin/bash"
-		}
-	}
-	
-	// Default shell args
-	if len(shellArgs) == 0 {
-		shellArgs = []string{"-l"}
-	}
+	shellPath, shellArgs := resolveShellPath(cfg)
 
 	cmd := exec.Command(shellPath, shellArgs...)
 	cmd.Dir = cwd
+	prepareCmd(cmd)
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
@@ -100,7 +187,7 @@ func newPersistentShell(cwd string) *PersistentShell {
 
 	shell := &PersistentShell{
 		cmd:          cmd,
-		stdin:        stdinPipe.(*os.File),
+		stdin:        stdinPipe,
 		isAlive:      true,
 		cwd:          cwd,
 		commandQueue: make(chan *commandExecution, 10),
@@ -248,6 +335,13 @@ func (s *PersistentShell) killChildren() {
 		return
 	}
 
+	if runtime.GOOS == "windows" {
+		killCmd := exec.Command("taskkill", "/F", "/T", "/PID", fmt.Sprintf("%d", s.cmd.Process.Pid))
+		prepareCmd(killCmd)
+		_ = killCmd.Run()
+		return
+	}
+
 	pgrepCmd := exec.Command("pgrep", "-P", fmt.Sprintf("%d", s.cmd.Process.Pid))
 	output, err := pgrepCmd.Output()
 	if err != nil {
@@ -295,9 +389,14 @@ func (s *PersistentShell) Close() {
 		return
 	}
 
-	s.stdin.Write([]byte("exit\n"))
+	if s.stdin != nil {
+		_, _ = s.stdin.Write([]byte("exit\n"))
+		_ = s.stdin.Close()
+	}
 
-	s.cmd.Process.Kill()
+	if s.cmd != nil && s.cmd.Process != nil {
+		_ = s.cmd.Process.Kill()
+	}
 	s.isAlive = false
 }
 

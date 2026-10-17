@@ -125,6 +125,49 @@ func WithTotalWidth(width int) SideBySideOption {
 }
 
 // -------------------------------------------------------------------------
+// Inline Diff Configuration
+// -------------------------------------------------------------------------
+
+// InlineDiffConfig configures the rendering of inline (unified) diffs
+type InlineDiffConfig struct {
+	TotalWidth     int
+	ShowHunkHeader bool
+}
+
+// InlineDiffOption modifies an InlineDiffConfig
+type InlineDiffOption func(*InlineDiffConfig)
+
+// NewInlineDiffConfig creates an InlineDiffConfig with default values
+func NewInlineDiffConfig(opts ...InlineDiffOption) InlineDiffConfig {
+	config := InlineDiffConfig{
+		TotalWidth:     120, // Default width for inline view
+		ShowHunkHeader: true,
+	}
+
+	for _, opt := range opts {
+		opt(&config)
+	}
+
+	return config
+}
+
+// WithInlineTotalWidth sets the total width for inline diff view
+func WithInlineTotalWidth(width int) InlineDiffOption {
+	return func(s *InlineDiffConfig) {
+		if width > 0 {
+			s.TotalWidth = width
+		}
+	}
+}
+
+// WithShowHunkHeader configures whether hunk headers (@@ ...) are shown
+func WithShowHunkHeader(show bool) InlineDiffOption {
+	return func(s *InlineDiffConfig) {
+		s.ShowHunkHeader = show
+	}
+}
+
+// -------------------------------------------------------------------------
 // Diff Parsing
 // -------------------------------------------------------------------------
 
@@ -797,6 +840,79 @@ func renderRightColumn(fileName string, dl *DiffLine, colWidth int) string {
 	)
 }
 
+// renderInlineLine formats a single diff line for inline unified display
+func renderInlineLine(fileName string, dl DiffLine, totalWidth int) string {
+	t := theme.CurrentTheme()
+	removedLineStyle, addedLineStyle, contextLineStyle, lineNumberStyle := createStyles(t)
+
+	var (
+		marker      string
+		bgStyle     lipgloss.Style
+		lineNumOld  string
+		lineNumNew  string
+		numStyleOld lipgloss.Style
+		numStyleNew lipgloss.Style
+	)
+
+	switch dl.Kind {
+	case LineRemoved:
+		marker = removedLineStyle.Foreground(t.DiffRemoved()).Bold(true).Render("-")
+		bgStyle = removedLineStyle
+		lineNumOld = fmt.Sprintf("%4d", dl.OldLineNo)
+		lineNumNew = "    "
+		numStyleOld = lineNumberStyle.Foreground(t.DiffRemoved()).Background(t.DiffRemovedLineNumberBg())
+		numStyleNew = lineNumberStyle.Foreground(t.DiffRemoved()).Background(t.DiffRemovedLineNumberBg())
+
+	case LineAdded:
+		marker = addedLineStyle.Foreground(t.DiffAdded()).Bold(true).Render("+")
+		bgStyle = addedLineStyle
+		lineNumOld = "    "
+		lineNumNew = fmt.Sprintf("%4d", dl.NewLineNo)
+		numStyleOld = lineNumberStyle.Foreground(t.DiffAdded()).Background(t.DiffAddedLineNumberBg())
+		numStyleNew = lineNumberStyle.Foreground(t.DiffAdded()).Background(t.DiffAddedLineNumberBg())
+
+	case LineContext:
+		marker = contextLineStyle.Render(" ")
+		bgStyle = contextLineStyle
+		if dl.OldLineNo > 0 {
+			lineNumOld = fmt.Sprintf("%4d", dl.OldLineNo)
+		} else {
+			lineNumOld = "    "
+		}
+		if dl.NewLineNo > 0 {
+			lineNumNew = fmt.Sprintf("%4d", dl.NewLineNo)
+		} else {
+			lineNumNew = "    "
+		}
+		numStyleOld = lineNumberStyle.Background(t.DiffContextBg())
+		numStyleNew = lineNumberStyle.Background(t.DiffContextBg())
+	}
+
+	sepStyle := lipgloss.NewStyle().Foreground(t.BorderDim()).Background(bgStyle.GetBackground())
+	separator := sepStyle.Render("│")
+
+	prefix := numStyleOld.Render(lineNumOld) + " " + numStyleNew.Render(lineNumNew) + " " + marker + " " + separator + " "
+
+	// Apply syntax highlighting
+	content := highlightLine(fileName, dl.Content, bgStyle.GetBackground())
+
+	// Apply intra-line highlighting
+	if dl.Kind == LineRemoved && len(dl.Segments) > 0 {
+		content = applyHighlighting(content, dl.Segments, LineRemoved, t.DiffHighlightRemoved())
+	} else if dl.Kind == LineAdded && len(dl.Segments) > 0 {
+		content = applyHighlighting(content, dl.Segments, LineAdded, t.DiffHighlightAdded())
+	}
+
+	lineText := prefix + content
+	return bgStyle.MaxHeight(1).Width(totalWidth).Render(
+		ansi.Truncate(
+			lineText,
+			totalWidth,
+			lipgloss.NewStyle().Background(bgStyle.GetBackground()).Foreground(t.TextMuted()).Render("..."),
+		),
+	)
+}
+
 // -------------------------------------------------------------------------
 // Public API
 // -------------------------------------------------------------------------
@@ -841,6 +957,49 @@ func FormatDiff(diffText string, opts ...SideBySideOption) (string, error) {
 	var sb strings.Builder
 	for _, h := range diffResult.Hunks {
 		sb.WriteString(RenderSideBySideHunk(diffResult.OldFile, h, opts...))
+	}
+
+	return sb.String(), nil
+}
+
+// RenderInlineHunk formats a hunk for inline (unified) display
+func RenderInlineHunk(fileName string, h Hunk, opts ...InlineDiffOption) string {
+	config := NewInlineDiffConfig(opts...)
+
+	hunkCopy := Hunk{Lines: make([]DiffLine, len(h.Lines))}
+	copy(hunkCopy.Lines, h.Lines)
+
+	HighlightIntralineChanges(&hunkCopy)
+
+	var sb strings.Builder
+
+	t := theme.CurrentTheme()
+	if config.ShowHunkHeader && h.Header != "" {
+		headerStyle := lipgloss.NewStyle().
+			Foreground(t.DiffHunkHeader()).
+			Background(t.BackgroundDarker()).
+			Bold(true).
+			Width(config.TotalWidth)
+		sb.WriteString(headerStyle.Render(fmt.Sprintf(" %s", h.Header)) + "\n")
+	}
+
+	for _, line := range hunkCopy.Lines {
+		sb.WriteString(renderInlineLine(fileName, line, config.TotalWidth) + "\n")
+	}
+
+	return sb.String()
+}
+
+// FormatInlineDiff creates an inline (unified) formatted view of a diff
+func FormatInlineDiff(diffText string, opts ...InlineDiffOption) (string, error) {
+	diffResult, err := ParseUnifiedDiff(diffText)
+	if err != nil {
+		return "", err
+	}
+
+	var sb strings.Builder
+	for _, h := range diffResult.Hunks {
+		sb.WriteString(RenderInlineHunk(diffResult.OldFile, h, opts...))
 	}
 
 	return sb.String(), nil

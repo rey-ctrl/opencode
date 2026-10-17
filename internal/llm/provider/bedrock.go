@@ -99,3 +99,10 @@ func (b *bedrockClient) stream(ctx context.Context, messages []message.Message, 
 	return b.childProvider.stream(ctx, messages, tools)
 }
 
+func (b *bedrockClient) SetSystemMessage(msg string) {
+	b.providerOptions.systemMessage = msg
+	if b.childProvider != nil {
+		b.childProvider.SetSystemMessage(msg)
+	}
+}
+

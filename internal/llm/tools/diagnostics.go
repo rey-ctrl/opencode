@@ -65,6 +65,12 @@ func (b *diagnosticsTool) Info() ToolInfo {
 	}
 }
 
+func (b *diagnosticsTool) Capability() ToolCapability {
+	return ToolCapability{
+		IsReadOnly: true,
+	}
+}
+
 func (b *diagnosticsTool) Run(ctx context.Context, call ToolCall) (ToolResponse, error) {
 	var params DiagnosticsParams
 	if err := json.Unmarshal([]byte(call.Input), &params); err != nil {

@@ -14,10 +14,13 @@ import (
 	"github.com/opencode-ai/opencode/internal/format"
 	"github.com/opencode-ai/opencode/internal/history"
 	"github.com/opencode-ai/opencode/internal/llm/agent"
+	"github.com/opencode-ai/opencode/internal/llm/prompt"
 	"github.com/opencode-ai/opencode/internal/logging"
 	"github.com/opencode-ai/opencode/internal/lsp"
+	"github.com/opencode-ai/opencode/internal/memory"
 	"github.com/opencode-ai/opencode/internal/message"
 	"github.com/opencode-ai/opencode/internal/permission"
+	"github.com/opencode-ai/opencode/internal/pubsub"
 	"github.com/opencode-ai/opencode/internal/session"
 	"github.com/opencode-ai/opencode/internal/tui/theme"
 )
@@ -27,6 +30,7 @@ type App struct {
 	Messages    message.Service
 	History     history.Service
 	Permissions permission.Service
+	Memory      memory.Service
 
 	CoderAgent agent.Service
 
@@ -44,12 +48,19 @@ func New(ctx context.Context, conn *sql.DB) (*App, error) {
 	sessions := session.NewService(q)
 	messages := message.NewService(q)
 	files := history.NewService(q, conn)
+	mem := memory.NewService(conn)
+
+	// Set dynamic memory provider for prompt injection
+	prompt.SetMemoryProvider(func(projectPath string) string {
+		return mem.GetSummaryForPrompt(context.Background(), projectPath, 15)
+	})
 
 	app := &App{
 		Sessions:    sessions,
 		Messages:    messages,
 		History:     files,
 		Permissions: permission.NewPermissionService(),
+		Memory:      mem,
 		LSPClients:  make(map[string]*lsp.Client),
 	}
 
@@ -59,18 +70,25 @@ func New(ctx context.Context, conn *sql.DB) (*App, error) {
 	// Initialize LSP clients in the background
 	go app.initLSPClients(ctx)
 
+	// Create a shared event broker so the subagent tool can publish progress
+	// events through the same broker the TUI subscribes to.
+	eventBroker := pubsub.NewBroker[agent.AgentEvent]()
+
 	var err error
 	app.CoderAgent, err = agent.NewAgent(
 		config.AgentCoder,
 		app.Sessions,
 		app.Messages,
-		agent.CoderAgentTools(
+		agent.CoderAgentToolsWithBroker(
 			app.Permissions,
 			app.Sessions,
 			app.Messages,
 			app.History,
 			app.LSPClients,
+			eventBroker,
+			app.Memory,
 		),
+		eventBroker,
 	)
 	if err != nil {
 		logging.Error("Failed to create coder agent", err)

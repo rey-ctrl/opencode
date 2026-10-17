@@ -88,6 +88,12 @@ func (l *lsTool) Info() ToolInfo {
 	}
 }
 
+func (l *lsTool) Capability() ToolCapability {
+	return ToolCapability{
+		IsReadOnly: true,
+	}
+}
+
 func (l *lsTool) Run(ctx context.Context, call ToolCall) (ToolResponse, error) {
 	var params LSParams
 	if err := json.Unmarshal([]byte(call.Input), &params); err != nil {
@@ -228,7 +234,7 @@ func createFileTree(sortedPaths []string) []*TreeNode {
 	pathMap := make(map[string]*TreeNode)
 
 	for _, path := range sortedPaths {
-		parts := strings.Split(path, string(filepath.Separator))
+		parts := strings.Split(filepath.ToSlash(path), "/")
 		currentPath := ""
 		var parentPath string
 
@@ -289,7 +295,7 @@ func createFileTree(sortedPaths []string) []*TreeNode {
 func printTree(tree []*TreeNode, rootPath string) string {
 	var result strings.Builder
 
-	result.WriteString(fmt.Sprintf("- %s%s\n", rootPath, string(filepath.Separator)))
+	result.WriteString(fmt.Sprintf("- %s/\n", filepath.ToSlash(rootPath)))
 
 	for _, node := range tree {
 		printNode(&result, node, 1)
@@ -303,7 +309,7 @@ func printNode(builder *strings.Builder, node *TreeNode, level int) {
 
 	nodeName := node.Name
 	if node.Type == "directory" {
-		nodeName += string(filepath.Separator)
+		nodeName += "/"
 	}
 
 	fmt.Fprintf(builder, "%s- %s\n", indent, nodeName)
