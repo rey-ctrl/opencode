@@ -38,26 +38,26 @@ OpenCode is a Go-based CLI application that brings AI assistance to your termina
 
 This fork introduces powerful developer-experience improvements, concurrency optimizations, and specialized tools analyzed in [`opencode_programmer_analysis.md`](opencode_programmer_analysis.md):
 
-### 🚀 Concurrency & Performance
+### Concurrency & Performance
 - **Session-Isolated Shell Pool**: Replaced the global singleton shell with a concurrent, thread-safe shell pool per session, eliminating bottlenecks and data races during parallel subagent operations.
 - **Parallel Tool Execution**: Concurrently executes read-only tools (`view`, `grep`, `glob`, `ls`) via goroutine worker pools while maintaining atomic file-level locking for write operations.
 - **Smart Output Truncation**: Intelligently truncates command output by prioritizing the latest logs, compiler errors, and test failures (keeping 80% from the tail) rather than blind symmetrical cutting.
 - **Subagent Progress Streaming**: Live streaming feedback from background subagents to the parent agent, providing real-time visibility into delegated tasks.
 
-### 🤖 Specialist Agent Roles
+### Specialist Agent Roles
 Dedicated agent personas with tailored tool sets for safer and more focused task delegation:
 - **`reviewer`**: Read-only agent focused on code quality, architecture, and static analysis without write or shell execution access.
 - **`tester`**: Focused on executing test runners, linting, and inspecting results without modifying source files.
 - **`debugger`**: Equipped with diagnostics, LSP symbol lookup, and test execution tools for root cause analysis.
 - **`architect`**: High-level system design agent focused on codebase analysis and coordinating subagent workflows.
 
-### 🛠️ Developer Tools & Intelligence
+### Developer Tools & Intelligence
 - **LSP Symbol Search (`find_symbol`)**: Semantic code navigation allowing the model to look up definitions, references, and implementations across the workspace using Language Server Protocol.
 - **Persistent Project Memory (`remember` / `recall`)**: SQLite-backed project memory storing key architectural decisions, conventions, and test setups across sessions.
 - **Multi-File Batch Editing (`multi_edit`)**: Coordinated atomic multi-file refactoring with consistency validation across modified files.
 - **Structured Test Runner (`test_runner`)**: Integrated runner for popular test suites (`go test`, `pytest`, `jest`, `cargo test`) that parses outputs into structured results.
 
-### 🛡️ Security, Context & UI
+### Security, Context & UI
 - **Configurable Command Allowlist & Bans**: Per-project command security overrides via `bash.allowedExtraCommands` (e.g., enabling `curl` or `wget` for API testing) and `bash.bannedCommands` in configuration.
 - **Dynamic & Git-Aware Context**: Automatically injects active git branch, recent commits, unstaged changes, and live timestamps into prompt context.
 - **TUI Diff Viewer**: Integrated visual diff viewer dialog directly in the terminal interface.
