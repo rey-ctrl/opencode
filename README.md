@@ -36,7 +36,7 @@ OpenCode is a Go-based CLI application that brings AI assistance to your termina
 
 ## Customized Features (Rey-Ctrl Fork)
 
-This fork introduces powerful developer-experience improvements, concurrency optimizations, and specialized tools analyzed in [`opencode_programmer_analysis.md`](opencode_programmer_analysis.md):
+This fork introduces powerful developer-experience improvements, concurrency optimizations, and specialized tools.:
 
 ### Concurrency & Performance
 - **Session-Isolated Shell Pool**: Replaced the global singleton shell with a concurrent, thread-safe shell pool per session, eliminating bottlenecks and data races during parallel subagent operations.
