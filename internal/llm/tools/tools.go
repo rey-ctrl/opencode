@@ -93,7 +93,7 @@ func IsToolReadOnly(tool BaseTool) bool {
 		return tc.Capability().IsReadOnly
 	}
 	switch tool.Info().Name {
-	case "view", "grep", "glob", "ls", "diagnostics", "sourcegraph", "find_symbol":
+	case "view", "grep", "glob", "ls", "diagnostics", "sourcegraph", "find_symbol", "recall":
 		return true
 	default:
 		return false

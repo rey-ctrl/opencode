@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -33,6 +34,7 @@ type keyMap struct {
 	Filepicker    key.Binding
 	Models        key.Binding
 	SwitchTheme   key.Binding
+	Diff          key.Binding
 }
 
 type startCompactSessionMsg struct{}
@@ -77,6 +79,11 @@ var keys = keyMap{
 	SwitchTheme: key.NewBinding(
 		key.WithKeys("ctrl+t"),
 		key.WithHelp("ctrl+t", "switch theme"),
+	),
+
+	Diff: key.NewBinding(
+		key.WithKeys("ctrl+d"),
+		key.WithHelp("ctrl+d", "view diff"),
 	),
 }
 
@@ -136,6 +143,9 @@ type appModel struct {
 	showMultiArgumentsDialog bool
 	multiArgumentsDialog     dialog.MultiArgumentsDialogCmp
 
+	showDiffDialog bool
+	diffDialog     dialog.DiffDialog
+
 	isCompacting      bool
 	compactingMessage string
 }
@@ -162,6 +172,8 @@ func (a appModel) Init() tea.Cmd {
 	cmd = a.filepicker.Init()
 	cmds = append(cmds, cmd)
 	cmd = a.themeDialog.Init()
+	cmds = append(cmds, cmd)
+	cmd = a.diffDialog.Init()
 	cmds = append(cmds, cmd)
 
 	// Check if we should show the init dialog
@@ -213,6 +225,7 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, filepickerCmd)
 
 		a.initDialog.SetSize(msg.Width, msg.Height)
+		a.diffDialog.SetSize(msg.Width, msg.Height)
 
 		if a.showMultiArgumentsDialog {
 			a.multiArgumentsDialog.SetSize(msg.Width, msg.Height)
@@ -478,6 +491,16 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case dialog.CloseDiffDialogMsg:
+		a.showDiffDialog = false
+		return a, nil
+
+	case dialog.OpenDiffDialogMsg:
+		a.diffDialog.SetDiff(msg.DiffText, msg.FileName)
+		a.diffDialog.SetSize(a.width, a.height)
+		a.showDiffDialog = true
+		return a, a.diffDialog.Init()
+
 	case tea.KeyMsg:
 		// If multi-arguments dialog is open, let it handle the key press first
 		if a.showMultiArgumentsDialog {
@@ -554,6 +577,30 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return a, a.themeDialog.Init()
 			}
 			return a, nil
+		case key.Matches(msg, keys.Diff):
+			if a.showDiffDialog {
+				a.showDiffDialog = false
+				return a, nil
+			}
+			if a.currentPage == page.ChatPage && !a.showQuit && !a.showPermissions && !a.showSessionDialog && !a.showCommandDialog {
+				cwd := config.WorkingDirectory()
+				out, err := exec.Command("git", "-C", cwd, "diff", "HEAD").CombinedOutput()
+				diffText := string(out)
+				if err != nil || strings.TrimSpace(diffText) == "" {
+					out2, err2 := exec.Command("git", "-C", cwd, "diff").CombinedOutput()
+					if err2 == nil && strings.TrimSpace(string(out2)) != "" {
+						diffText = string(out2)
+					}
+				}
+				if strings.TrimSpace(diffText) == "" {
+					return a, util.ReportInfo("No git changes detected in working tree")
+				}
+				a.diffDialog.SetDiff(diffText, "git diff (working tree)")
+				a.diffDialog.SetSize(a.width, a.height)
+				a.showDiffDialog = true
+				return a, a.diffDialog.Init()
+			}
+			return a, nil
 		case key.Matches(msg, returnKey) || key.Matches(msg):
 			if msg.String() == quitKey {
 				if a.currentPage == page.LogsPage {
@@ -579,6 +626,10 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if a.showFilepicker {
 					a.showFilepicker = false
 					a.filepicker.ToggleFilepicker(a.showFilepicker)
+					return a, nil
+				}
+				if a.showDiffDialog {
+					a.showDiffDialog = false
 					return a, nil
 				}
 				if a.currentPage == page.LogsPage {
@@ -637,6 +688,15 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.permissions = d.(dialog.PermissionDialogCmp)
 		cmds = append(cmds, permissionsCmd)
 		// Only block key messages send all other messages down
+		if _, ok := msg.(tea.KeyMsg); ok {
+			return a, tea.Batch(cmds...)
+		}
+	}
+
+	if a.showDiffDialog {
+		d, diffCmd := a.diffDialog.Update(msg)
+		a.diffDialog = d.(dialog.DiffDialog)
+		cmds = append(cmds, diffCmd)
 		if _, ok := msg.(tea.KeyMsg); ok {
 			return a, tea.Batch(cmds...)
 		}
@@ -931,6 +991,21 @@ func (a appModel) View() string {
 		)
 	}
 
+	if a.showDiffDialog {
+		overlay := a.diffDialog.View()
+		row := lipgloss.Height(appView) / 2
+		row -= lipgloss.Height(overlay) / 2
+		col := lipgloss.Width(appView) / 2
+		col -= lipgloss.Width(overlay) / 2
+		appView = layout.PlaceOverlay(
+			col,
+			row,
+			overlay,
+			appView,
+			true,
+		)
+	}
+
 	return appView
 }
 
@@ -948,6 +1023,7 @@ func New(app *app.App) tea.Model {
 		permissions:   dialog.NewPermissionDialogCmp(),
 		initDialog:    dialog.NewInitDialogCmp(),
 		themeDialog:   dialog.NewThemeDialogCmp(),
+		diffDialog:    dialog.NewDiffDialogCmp(),
 		app:           app,
 		commands:      []dialog.Command{},
 		pages: map[page.PageID]tea.Model{
@@ -984,6 +1060,35 @@ If there are Cursor rules (in .cursor/rules/ or .cursorrules) or Copilot rules (
 		Handler: func(cmd dialog.Command) tea.Cmd {
 			return func() tea.Msg {
 				return startCompactSessionMsg{}
+			}
+		},
+	})
+
+	model.RegisterCommand(dialog.Command{
+		ID:          "diff",
+		Title:       "View Git Diff",
+		Description: "Inspect working tree or staged changes in unified/side-by-side view",
+		Handler: func(cmd dialog.Command) tea.Cmd {
+			return func() tea.Msg {
+				cwd := config.WorkingDirectory()
+				out, err := exec.Command("git", "-C", cwd, "diff", "HEAD").CombinedOutput()
+				diffText := string(out)
+				if err != nil || strings.TrimSpace(diffText) == "" {
+					out2, err2 := exec.Command("git", "-C", cwd, "diff").CombinedOutput()
+					if err2 == nil && strings.TrimSpace(string(out2)) != "" {
+						diffText = string(out2)
+					}
+				}
+				if strings.TrimSpace(diffText) == "" {
+					return util.InfoMsg{
+						Type: util.InfoTypeInfo,
+						Msg:  "No git changes detected in working tree",
+					}
+				}
+				return dialog.OpenDiffDialogMsg{
+					DiffText: diffText,
+					FileName: "git diff (working tree)",
+				}
 			}
 		},
 	})

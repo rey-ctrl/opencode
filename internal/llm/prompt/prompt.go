@@ -75,25 +75,13 @@ func getMemorySummary(projectPath string) string {
 	return ""
 }
 
-var (
-	onceContext    sync.Once
-	contextContent string
-)
-
 func getContextFromPaths() string {
 	cfg := config.Get()
 	if cfg == nil {
 		return ""
 	}
 
-	onceContext.Do(func() {
-		workDir := cfg.WorkingDir
-		contextPaths := cfg.ContextPaths
-
-		contextContent = processContextPaths(workDir, contextPaths)
-	})
-
-	return contextContent
+	return processContextPaths(cfg.WorkingDir, cfg.ContextPaths)
 }
 
 func processContextPaths(workDir string, paths []string) string {

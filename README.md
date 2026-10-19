@@ -21,11 +21,6 @@ A powerful terminal-based AI assistant for developers, providing intelligent cod
 
 OpenCode is a Go-based CLI application that brings AI assistance to your terminal. It provides a TUI (Terminal User Interface) for interacting with various AI models to help with coding tasks, debugging, and more.
 
-<p>For a quick video overview, check out
-<a href="https://www.youtube.com/watch?v=P8luPmEa1QI"><img width="25" src="https://upload.wikimedia.org/wikipedia/commons/0/09/YouTube_full-color_icon_%282017%29.svg"> OpenCode + Gemini 2.5 Pro: BYE Claude Code! I'm SWITCHING To the FASTEST AI Coder!</a></p>
-
-<a href="https://www.youtube.com/watch?v=P8luPmEa1QI"><img width="550" src="https://i3.ytimg.com/vi/P8luPmEa1QI/maxresdefault.jpg"></a><p>
-
 ## Features
 
 - **Interactive TUI**: Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) for a smooth terminal experience
@@ -38,6 +33,35 @@ OpenCode is a Go-based CLI application that brings AI assistance to your termina
 - **File Change Tracking**: Track and visualize file changes during sessions
 - **External Editor Support**: Open your preferred editor for composing messages
 - **Named Arguments for Custom Commands**: Create powerful custom commands with multiple named placeholders
+
+## Customized Features (Rey-Ctrl Fork)
+
+This fork introduces powerful developer-experience improvements, concurrency optimizations, and specialized tools analyzed in [`opencode_programmer_analysis.md`](opencode_programmer_analysis.md):
+
+### 🚀 Concurrency & Performance
+- **Session-Isolated Shell Pool**: Replaced the global singleton shell with a concurrent, thread-safe shell pool per session, eliminating bottlenecks and data races during parallel subagent operations.
+- **Parallel Tool Execution**: Concurrently executes read-only tools (`view`, `grep`, `glob`, `ls`) via goroutine worker pools while maintaining atomic file-level locking for write operations.
+- **Smart Output Truncation**: Intelligently truncates command output by prioritizing the latest logs, compiler errors, and test failures (keeping 80% from the tail) rather than blind symmetrical cutting.
+- **Subagent Progress Streaming**: Live streaming feedback from background subagents to the parent agent, providing real-time visibility into delegated tasks.
+
+### 🤖 Specialist Agent Roles
+Dedicated agent personas with tailored tool sets for safer and more focused task delegation:
+- **`reviewer`**: Read-only agent focused on code quality, architecture, and static analysis without write or shell execution access.
+- **`tester`**: Focused on executing test runners, linting, and inspecting results without modifying source files.
+- **`debugger`**: Equipped with diagnostics, LSP symbol lookup, and test execution tools for root cause analysis.
+- **`architect`**: High-level system design agent focused on codebase analysis and coordinating subagent workflows.
+
+### 🛠️ Developer Tools & Intelligence
+- **LSP Symbol Search (`find_symbol`)**: Semantic code navigation allowing the model to look up definitions, references, and implementations across the workspace using Language Server Protocol.
+- **Persistent Project Memory (`remember` / `recall`)**: SQLite-backed project memory storing key architectural decisions, conventions, and test setups across sessions.
+- **Multi-File Batch Editing (`multi_edit`)**: Coordinated atomic multi-file refactoring with consistency validation across modified files.
+- **Structured Test Runner (`test_runner`)**: Integrated runner for popular test suites (`go test`, `pytest`, `jest`, `cargo test`) that parses outputs into structured results.
+
+### 🛡️ Security, Context & UI
+- **Configurable Command Allowlist & Bans**: Per-project command security overrides via `bash.allowedExtraCommands` (e.g., enabling `curl` or `wget` for API testing) and `bash.bannedCommands` in configuration.
+- **Dynamic & Git-Aware Context**: Automatically injects active git branch, recent commits, unstaged changes, and live timestamps into prompt context.
+- **TUI Diff Viewer**: Integrated visual diff viewer dialog directly in the terminal interface.
+- **Custom Header Branding**: In-terminal branding badge displaying customizable metadata (`customized by Rey-Ctrl`).
 
 ## Installation
 

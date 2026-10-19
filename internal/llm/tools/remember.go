@@ -9,6 +9,10 @@ import (
 	"github.com/opencode-ai/opencode/internal/memory"
 )
 
+const (
+	RememberToolName = "remember"
+)
+
 type RememberTool struct {
 	memory memory.Service
 }
@@ -27,7 +31,7 @@ type RememberParams struct {
 
 func (t *RememberTool) Info() ToolInfo {
 	return ToolInfo{
-		Name:        "remember",
+		Name:        RememberToolName,
 		Description: "Save a persistent project convention, architectural decision, gotcha, or build instruction for the current repository across future sessions.",
 		Parameters: map[string]any{
 			"key": map[string]any{

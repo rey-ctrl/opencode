@@ -240,6 +240,18 @@ func toolName(name string) string {
 		return "Write"
 	case tools.PatchToolName:
 		return "Patch"
+	case tools.MultiEditToolName:
+		return "MultiEdit"
+	case tools.TestRunnerToolName:
+		return "TestRunner"
+	case tools.FindSymbolToolName:
+		return "Symbol"
+	case tools.RememberToolName:
+		return "Remember"
+	case tools.RecallToolName:
+		return "Recall"
+	case tools.DiagnosticsToolName:
+		return "Diagnostics"
 	}
 	return name
 }
@@ -268,6 +280,18 @@ func getToolAction(name string) string {
 		return "Preparing write..."
 	case tools.PatchToolName:
 		return "Preparing patch..."
+	case tools.MultiEditToolName:
+		return "Planning multi-file edits..."
+	case tools.TestRunnerToolName:
+		return "Running test suite..."
+	case tools.FindSymbolToolName:
+		return "Locating symbol..."
+	case tools.RememberToolName:
+		return "Storing project memory..."
+	case tools.RecallToolName:
+		return "Recalling memories..."
+	case tools.DiagnosticsToolName:
+		return "Checking diagnostics..."
 	}
 	return "Working..."
 }
@@ -423,6 +447,67 @@ func renderToolParams(paramWidth int, toolCall message.ToolCall) string {
 		json.Unmarshal([]byte(toolCall.Input), &params)
 		filePath := removeWorkingDirPrefix(params.FilePath)
 		return renderParams(paramWidth, filePath)
+	case tools.MultiEditToolName:
+		var params tools.MultiEditParams
+		json.Unmarshal([]byte(toolCall.Input), &params)
+		desc := params.Description
+		if desc == "" {
+			desc = fmt.Sprintf("%d edits across multiple files", len(params.Edits))
+		}
+		return renderParams(paramWidth, desc)
+	case tools.TestRunnerToolName:
+		var params tools.TestRunnerParams
+		json.Unmarshal([]byte(toolCall.Input), &params)
+		target := params.TestFilter
+		if target == "" {
+			target = params.Package
+		}
+		if target == "" {
+			target = "all tests"
+		}
+		toolParams := []string{target}
+		if params.Framework != "" && params.Framework != "auto" {
+			toolParams = append(toolParams, "framework", params.Framework)
+		}
+		return renderParams(paramWidth, toolParams...)
+	case tools.FindSymbolToolName:
+		var params tools.FindSymbolParams
+		json.Unmarshal([]byte(toolCall.Input), &params)
+		mainParam := params.Query
+		if mainParam == "" {
+			mainParam = removeWorkingDirPrefix(params.FilePath)
+		}
+		toolParams := []string{mainParam}
+		if params.Kind != "" {
+			toolParams = append(toolParams, "kind", params.Kind)
+		}
+		return renderParams(paramWidth, toolParams...)
+	case tools.RememberToolName:
+		var params tools.RememberParams
+		json.Unmarshal([]byte(toolCall.Input), &params)
+		toolParams := []string{params.Key}
+		if params.Category != "" {
+			toolParams = append(toolParams, "cat", params.Category)
+		}
+		return renderParams(paramWidth, toolParams...)
+	case tools.RecallToolName:
+		var params tools.RecallParams
+		json.Unmarshal([]byte(toolCall.Input), &params)
+		toolParams := []string{params.Query}
+		if params.Category != "" {
+			toolParams = append(toolParams, "cat", params.Category)
+		}
+		return renderParams(paramWidth, toolParams...)
+	case tools.DiagnosticsToolName:
+		var params tools.DiagnosticsParams
+		json.Unmarshal([]byte(toolCall.Input), &params)
+		filePath := removeWorkingDirPrefix(params.FilePath)
+		if filePath == "" {
+			filePath = "workspace"
+		}
+		return renderParams(paramWidth, filePath)
+	case tools.PatchToolName:
+		return renderParams(paramWidth, "patch changes")
 	default:
 		input := strings.ReplaceAll(toolCall.Input, "\n", " ")
 		params = renderParams(paramWidth, input)
@@ -523,6 +608,60 @@ func renderToolResponse(toolCall message.ToolCall, response message.ToolResult, 
 			toMarkdown(resultContent, true, width),
 			t.Background(),
 		)
+	case tools.MultiEditToolName:
+		var meta tools.MultiEditResponseMetadata
+		json.Unmarshal([]byte(response.Metadata), &meta)
+		if meta.Diff != "" {
+			truncDiff := truncateHeight(meta.Diff, maxResultHeight)
+			formattedDiff, _ := diff.FormatDiff(truncDiff, diff.WithTotalWidth(width))
+			statsStyle := baseStyle.Bold(true).Foreground(t.Primary()).
+				Render(fmt.Sprintf("%d file(s) modified (+%d / -%d lines)", meta.FilesModified, meta.Additions, meta.Removals))
+			if formattedDiff != "" {
+				return lipgloss.JoinVertical(lipgloss.Left, statsStyle, formattedDiff)
+			}
+			return statsStyle
+		}
+		return baseStyle.Width(width).Foreground(t.TextMuted()).Render(resultContent)
+	case tools.PatchToolName:
+		var meta tools.PatchResponseMetadata
+		json.Unmarshal([]byte(response.Metadata), &meta)
+		if len(meta.FilesChanged) > 0 {
+			stats := fmt.Sprintf("Applied patch to %d file(s) (+%d / -%d lines)", len(meta.FilesChanged), meta.Additions, meta.Removals)
+			return baseStyle.Bold(true).Foreground(t.Success()).Render(stats)
+		}
+		return baseStyle.Width(width).Foreground(t.TextMuted()).Render(resultContent)
+	case tools.TestRunnerToolName:
+		var report tools.TestReport
+		json.Unmarshal([]byte(response.Metadata), &report)
+		var badge string
+		if report.Success {
+			badge = baseStyle.Bold(true).Foreground(t.Success()).
+				Render(fmt.Sprintf("✓ PASS (%s) - %d passed in %.2fs", report.Framework, report.Passed, report.Duration))
+		} else {
+			badge = baseStyle.Bold(true).Foreground(t.Error()).
+				Render(fmt.Sprintf("✗ FAIL (%s) - %d failed, %d passed in %.2fs", report.Framework, report.Failed, report.Passed, report.Duration))
+		}
+		if !report.Success && len(report.Failures) > 0 {
+			var failLines []string
+			failLines = append(failLines, badge)
+			for i, f := range report.Failures {
+				if i >= 5 {
+					failLines = append(failLines, baseStyle.Foreground(t.TextMuted()).Render(fmt.Sprintf("... and %d more failure(s)", len(report.Failures)-5)))
+					break
+				}
+				failLines = append(failLines, baseStyle.Foreground(t.Error()).Render(fmt.Sprintf("  • %s: %s", f.TestName, f.ErrorMessage)))
+			}
+			return lipgloss.JoinVertical(lipgloss.Left, failLines...)
+		}
+		return badge
+	case tools.FindSymbolToolName:
+		return baseStyle.Width(width).Foreground(t.TextMuted()).Render(resultContent)
+	case tools.RememberToolName:
+		return baseStyle.Bold(true).Foreground(t.Success()).Render(fmt.Sprintf("🧠 %s", resultContent))
+	case tools.RecallToolName:
+		return baseStyle.Width(width).Foreground(t.TextMuted()).Render(resultContent)
+	case tools.DiagnosticsToolName:
+		return baseStyle.Width(width).Foreground(t.TextMuted()).Render(resultContent)
 	default:
 		resultContent = fmt.Sprintf("```text\n%s\n```", resultContent)
 		return styles.ForceReplaceBackgroundWithLipgloss(

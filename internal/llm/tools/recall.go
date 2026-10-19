@@ -11,6 +11,10 @@ import (
 	"github.com/opencode-ai/opencode/internal/memory"
 )
 
+const (
+	RecallToolName = "recall"
+)
+
 type RecallTool struct {
 	memory memory.Service
 }
@@ -18,6 +22,13 @@ type RecallTool struct {
 func NewRecallTool(mem memory.Service) *RecallTool {
 	return &RecallTool{
 		memory: mem,
+	}
+}
+
+// Capability marks RecallTool as read-only, eligible for parallel concurrent execution.
+func (t *RecallTool) Capability() ToolCapability {
+	return ToolCapability{
+		IsReadOnly: true,
 	}
 }
 
@@ -33,7 +44,7 @@ type RecallParams struct {
 
 func (t *RecallTool) Info() ToolInfo {
 	return ToolInfo{
-		Name:        "recall",
+		Name:        RecallToolName,
 		Description: "Search and retrieve persistent project memories, conventions, build instructions, and architecture decisions stored across sessions for this repository.",
 		Parameters: map[string]any{
 			"query": map[string]any{
